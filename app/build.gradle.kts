@@ -15,9 +15,23 @@ android {
         versionName = "1.0"
     }
 
+    // Fixed key so every GitHub build can be installed over the previous one
+    signingConfigs {
+        create("gridcam") {
+            storeFile = file("gridcam-debug.jks")
+            storePassword = "gridcam123"
+            keyAlias = "gridcam"
+            keyPassword = "gridcam123"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("gridcam")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("gridcam")
         }
     }
     compileOptions {
