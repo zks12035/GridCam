@@ -12,10 +12,12 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.MotionEvent
@@ -119,6 +121,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         detector = ObjectDetection.getClient(
             ObjectDetectorOptions.Builder()
                 .setDetectorMode(ObjectDetectorOptions.STREAM_MODE)
+                .enableMultipleObjects()
                 .build()
         )
 
@@ -198,11 +201,29 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> pinching = false
                 MotionEvent.ACTION_UP -> {
-                    if (!pinching && event.eventTime - event.downTime < 400) {
+                    val pressTime = event.eventTime - event.downTime
+                    if (!pinching && pressTime >= 600) {
+                        // long-press: clear the selected subject
+                        selected = false
+                        lockedBox = null
+                        lockedId = null
+                        pendingTap = null
+                        overlay.clearSubject()
+                        camera?.cameraControl?.cancelFocusAndMetering()
+                        Toast.makeText(this, "Subject cleared", Toast.LENGTH_SHORT).show()
+                    }
+                    if (!pinching && pressTime < 400) {
+                        // tap: select this object (camera-frame coordinates) and focus on it
+                        if (previewView.width > 0) {
+                            pendingTap = PointF(event.x / previewView.width, event.y / previewView.height)
+                        }
+                        lastFocusTime = SystemClock.uptimeMillis()
+                        lastFocusX = event.x / previewView.width.coerceAtLeast(1)
+                        lastFocusY = event.y / previewView.height.coerceAtLeast(1)
                         val point = previewView.meteringPointFactory.createPoint(event.x, event.y)
                         val action = FocusMeteringAction.Builder(
                             point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
-                        ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
+                        ).disableAutoCancel().build()
                         camera?.cameraControl?.startFocusAndMetering(action)
                         // the preview may be scaled for extra digital zoom; convert to screen position
                         val cx = previewView.width / 2f
@@ -331,6 +352,20 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         }, ContextCompat.getMainExecutor(this))
     }
 
+    // ---------- Subject selection + tracking ----------
+
+    private var pendingTap: PointF? = null      // where the user tapped (camera-frame 0..1)
+    private var selected = false
+    private var lockedId: Int? = null           // ML Kit tracking id, if the detector knows the object
+    private var lockedBox: RectF? = null        // current subject box (camera-frame 0..1)
+    private var lostFrames = 0
+    private val tracker = TemplateTracker()
+    private var lastFocusTime = 0L
+    private var lastFocusX = 0f
+    private var lastFocusY = 0f
+
+    private class Det(val id: Int?, val box: RectF)
+
     @OptIn(ExperimentalGetImage::class)
     private fun analyze(proxy: ImageProxy) {
         val media = proxy.image
@@ -342,22 +377,103 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         val sideways = rotation == 90 || rotation == 270
         val w = (if (sideways) proxy.height else proxy.width).toFloat()
         val h = (if (sideways) proxy.width else proxy.height).toFloat()
+        val gray = SceneAnalyzer.gray(proxy)   // small grayscale copy for tracking + scene analysis
         val input = InputImage.fromMediaImage(media, rotation)
 
         detector.process(input)
             .addOnSuccessListener { objects ->
-                val best = objects.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
-                val box = best?.boundingBox?.let {
-                    RectF(
-                        (it.left / w).coerceIn(0f, 1f),
-                        (it.top / h).coerceIn(0f, 1f),
-                        (it.right / w).coerceIn(0f, 1f),
-                        (it.bottom / h).coerceIn(0f, 1f)
+                val dets = objects.map {
+                    val bb = it.boundingBox
+                    Det(
+                        it.trackingId,
+                        RectF(
+                            (bb.left / w).coerceIn(0f, 1f), (bb.top / h).coerceIn(0f, 1f),
+                            (bb.right / w).coerceIn(0f, 1f), (bb.bottom / h).coerceIn(0f, 1f)
+                        )
                     )
                 }
-                overlay.updateSubject(box?.let { toScreen(it) })
+                handleFrame(gray, dets)
             }
             .addOnCompleteListener { proxy.close() }
+    }
+
+    private fun handleFrame(gray: FloatArray, dets: List<Det>) {
+        // 1. A new tap: pick the detected object under the finger, or follow the tapped spot
+        pendingTap?.let { tap ->
+            pendingTap = null
+            val hit = dets.filter { it.box.contains(tap.x, tap.y) }
+                .minByOrNull { it.box.width() * it.box.height() }
+                ?: dets.minByOrNull { Math.hypot((it.box.centerX() - tap.x).toDouble(), (it.box.centerY() - tap.y).toDouble()) }
+                    ?.takeIf { Math.hypot((it.box.centerX() - tap.x).toDouble(), (it.box.centerY() - tap.y).toDouble()) < 0.12 }
+            overlay.clearSubject()
+            selected = true
+            lostFrames = 0
+            if (hit != null) {
+                lockedId = hit.id
+                lockedBox = RectF(hit.box)
+                tracker.start(gray, hit.box.centerX(), hit.box.centerY())
+            } else {
+                lockedId = null
+                lockedBox = RectF(tap.x - 0.11f, tap.y - 0.08f, tap.x + 0.11f, tap.y + 0.08f)
+                tracker.start(gray, tap.x, tap.y)
+            }
+        }
+
+        // 2. Follow the selected subject
+        var box: RectF? = null
+        if (selected) {
+            val id = lockedId
+            if (id != null) box = dets.firstOrNull { it.id == id }?.box
+            val c = tracker.update(gray)
+            if (box != null) {
+                tracker.start(gray, box.centerX(), box.centerY())   // re-anchor on the detector's box
+            } else if (c != null) {
+                val old = lockedBox
+                if (old != null) {
+                    val hw = old.width() / 2f
+                    val hh = old.height() / 2f
+                    box = RectF(c[0] - hw, c[1] - hh, c[0] + hw, c[1] + hh)
+                }
+            }
+            if (box != null) {
+                lockedBox = RectF(box)
+                lostFrames = 0
+                maybeRefocus(box)
+            } else if (++lostFrames > 30) {
+                selected = false
+                lockedBox = null
+                camera?.cameraControl?.cancelFocusAndMetering()
+                Toast.makeText(this, "Subject lost. Tap it again.", Toast.LENGTH_SHORT).show()
+            } else {
+                box = lockedBox   // keep the last position for a moment
+            }
+        }
+
+        // 3. Read the surroundings and update the grid
+        val info = SceneAnalyzer.analyze(gray, box)
+        val hy = if (info.horizonY.isNaN()) Float.NaN else 0.5f + (info.horizonY - 0.5f) * extraZoom
+        overlay.updateScene(info, if (hy in 0f..1f) hy else Float.NaN)
+        overlay.updateSubject(if (selected) box?.let { toScreen(it) } else null)
+    }
+
+    /** Keeps focus on the subject while it moves. */
+    private fun maybeRefocus(b: RectF) {
+        val now = SystemClock.uptimeMillis()
+        val moved = Math.hypot((b.centerX() - lastFocusX).toDouble(), (b.centerY() - lastFocusY).toDouble())
+        // refocus when the subject moves, and every 3 s anyway (distance may change)
+        if (now - lastFocusTime < 1500) return
+        if (moved < 0.08 && now - lastFocusTime < 3000) return
+        lastFocusTime = now
+        lastFocusX = b.centerX()
+        lastFocusY = b.centerY()
+        if (previewView.width == 0) return
+        val point = previewView.meteringPointFactory.createPoint(
+            b.centerX() * previewView.width, b.centerY() * previewView.height
+        )
+        camera?.cameraControl?.startFocusAndMetering(
+            FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                .disableAutoCancel().build()
+        )
     }
 
     /** Maps a normalized box from the camera frame to the (possibly digitally zoomed) screen. */

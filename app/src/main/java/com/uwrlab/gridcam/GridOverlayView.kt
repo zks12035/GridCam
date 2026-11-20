@@ -59,6 +59,14 @@ class GridOverlayView @JvmOverloads constructor(
     private var pendingCount = 0
 
     private var subject: RectF? = null
+    private var scene: SceneInfo? = null
+    private var horizonScreenY = Float.NaN
+    private val horizonPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(0, 229, 255)
+        style = Paint.Style.STROKE
+        strokeWidth = 2f * resources.displayMetrics.density
+        pathEffect = DashPathEffect(floatArrayOf(14f, 10f), 0f)
+    }
     private var missedFrames = 0
     private var target: PointF? = null
     private var aligned = false
@@ -135,6 +143,17 @@ class GridOverlayView @JvmOverloads constructor(
         strokeWidth = 2f * d
         pathEffect = DashPathEffect(floatArrayOf(8f * d, 6f * d), 0f)
     }
+    private val focusBracket = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f * d
+        setShadowLayer(2f * d, 0f, 0f, Color.BLACK)
+    }
+    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 13f * d
+        textAlign = Paint.Align.CENTER
+        setShadowLayer(3f * d, 0f, 0f, Color.BLACK)
+    }
     private val focusPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.STROKE
@@ -204,7 +223,7 @@ class GridOverlayView @JvmOverloads constructor(
     fun updateSubject(box: RectF?) {
         if (box == null) {
             missedFrames++
-            if (missedFrames > 6) subject = null
+            if (missedFrames > 2) subject = null
         } else {
             missedFrames = 0
             val old = subject
@@ -215,6 +234,20 @@ class GridOverlayView @JvmOverloads constructor(
                 lerp(old.bottom, box.bottom)
             )
         }
+        recompute()
+        invalidate()
+    }
+
+    /** Surroundings info from [SceneAnalyzer]; [horizonY] already mapped to screen (0..1) or NaN. */
+    fun updateScene(info: SceneInfo?, horizonY: Float) {
+        scene = info
+        horizonScreenY = horizonY
+    }
+
+    /** Clears the selected subject immediately. */
+    fun clearSubject() {
+        subject = null
+        missedFrames = 0
         recompute()
         invalidate()
     }
@@ -239,15 +272,27 @@ class GridOverlayView @JvmOverloads constructor(
     private fun viewH() = if (height > 0) height.toFloat() else 4f
 
     private fun recommend(s: RectF?): Pair<GridMode, String> {
-        if (s == null) return GridMode.THIRDS to "No subject found yet. Showing rule of thirds."
-        val area = s.width() * s.height()
+        val sc = scene
+        val area = if (s != null) s.width() * s.height() else 0f
+        if (s != null && area > 0.40f) return GridMode.CENTER to "Large subject: center it for a bold shot."
+        if (sc != null && sc.symmetry > 0.72f) {
+            return GridMode.CENTER to "Symmetric surroundings: center the subject for a mirror-like shot."
+        }
+        if (sc != null && sc.diagonal > 0.55f) {
+            return if (s != null && area in 0.05f..0.25f)
+                GridMode.TRIANGLES to "Strong diagonal lines around it: golden triangles follow them."
+            else GridMode.DIAGONAL to "Strong diagonal lines: let them lead the eye to the subject."
+        }
+        if (sc != null && !sc.horizonY.isNaN()) {
+            return GridMode.THIRDS to "Long horizontal line (horizon/edge): keep it on a third line."
+        }
+        if (s == null) return GridMode.THIRDS to "Tap the object you want to photograph."
         val tallness = (s.height() * viewH()) / (s.width() * viewW()).coerceAtLeast(0.001f)
         return when {
-            area > 0.40f -> GridMode.CENTER to "Large subject: center it for a bold, symmetric shot."
-            area < 0.05f -> GridMode.SPIRAL to "Small subject: the golden spiral leaves pleasing empty space."
+            area < 0.05f -> GridMode.SPIRAL to "Small subject with open space around: the golden spiral uses it."
             tallness > 1.8f -> GridMode.THIRDS to "Tall subject: place it on a vertical third line."
             tallness < 0.55f -> GridMode.DIAGONAL to "Wide subject: diagonals add depth and movement."
-            else -> GridMode.PHI to "Medium subject: the golden ratio gives natural balance."
+            else -> GridMode.PHI to "Balanced surroundings: the golden ratio gives a natural look."
         }
     }
 
@@ -278,7 +323,10 @@ class GridOverlayView @JvmOverloads constructor(
         if (s == null) {
             target = null
             aligned = false
-            listener?.onGuidance(activeMode, reason, "Point the camera at a subject", false)
+            listener?.onGuidance(
+                activeMode, reason,
+                "Tap the object you want to photograph" + horizonHint(), false
+            )
             return
         }
 
@@ -296,7 +344,21 @@ class GridOverlayView @JvmOverloads constructor(
             }
             else -> strongPoints(activeMode, w, h)
         }
-        val best = candidates.minByOrNull { hypot(it.x - cx, it.y - cy) } ?: PointF(0.5f, 0.5f)
+        // Prefer the side that leaves empty space in front of the subject
+        val open = scene?.openSide ?: 0f
+        val sideAware = activeMode in setOf(
+            GridMode.THIRDS, GridMode.PHI, GridMode.SPIRAL, GridMode.SQUARE, GridMode.ARMATURE
+        ) && abs(open) > 0.15f
+        val best = candidates.minByOrNull {
+            var score = hypot(it.x - cx, it.y - cy)
+            if (sideAware && ((open > 0f && it.x > 0.55f) || (open < 0f && it.x < 0.45f))) score += 0.15f
+            score
+        } ?: PointF(0.5f, 0.5f)
+        var sideNote = ""
+        if (sideAware && userMode == GridMode.AUTO) {
+            sideNote = if (open > 0f) " More open space on the right: keep the subject left."
+            else " More open space on the left: keep the subject right."
+        }
 
         if (activeMode == GridMode.SPIRAL) {
             spiralFlipX = abs(best.x - spiralEye.x) > 0.001f
@@ -317,8 +379,14 @@ class GridOverlayView @JvmOverloads constructor(
             if (abs(dx) >= tol) parts.add(if (dx > 0) "pan left ←" else "pan right →")
             if (abs(dy) >= tol) parts.add(if (dy > 0) "tilt up ↑" else "tilt down ↓")
             "Bring the yellow dot into the red circle: " + parts.joinToString(", ")
-        }
-        listener?.onGuidance(activeMode, reason, guidance, aligned)
+        } + horizonHint()
+        listener?.onGuidance(activeMode, reason + sideNote, guidance, aligned)
+    }
+
+    private fun horizonHint(): String {
+        val hy = horizonScreenY
+        if (hy.isNaN()) return ""
+        return if (hy in 0.42f..0.58f) "\nHorizon is in the middle: tilt so it sits on a third line" else ""
     }
 
     private fun nearestDist(pts: List<PointF>, x: Float, y: Float): Float =
@@ -387,6 +455,9 @@ class GridOverlayView @JvmOverloads constructor(
             GridMode.ARMATURE -> drawArmature(canvas, w, h)
             GridMode.SAFE -> drawSafe(canvas, w, h)
         }
+        if (!horizonScreenY.isNaN()) {
+            canvas.drawLine(0f, horizonScreenY * h, w, horizonScreenY * h, horizonPaint)
+        }
         drawLevel(canvas, w, h)
 
         val pts = if (activeMode == GridMode.SPIRAL) listOf(currentEye()) else strongPoints(activeMode, w, h)
@@ -402,6 +473,17 @@ class GridOverlayView @JvmOverloads constructor(
                 canvas.drawLine(r.centerX(), r.centerY(), t.x * w, t.y * h, linkPaint)
             }
             canvas.drawCircle(r.centerX(), r.centerY(), 7f * d, subjectFill)
+            // focus brackets: the camera keeps focus here
+            val fx = r.centerX()
+            val fy = r.centerY()
+            val q = 20f * d
+            val l = 7f * d
+            for (sx in intArrayOf(-1, 1)) for (sy in intArrayOf(-1, 1)) {
+                canvas.drawLine(fx + sx * q, fy + sy * q, fx + sx * (q - l), fy + sy * q, focusBracket)
+                canvas.drawLine(fx + sx * q, fy + sy * q, fx + sx * q, fy + sy * (q - l), focusBracket)
+            }
+            labelPaint.color = Color.WHITE
+            canvas.drawText("Focus", fx, fy + q + 16f * d, labelPaint)
         }
 
         target?.let { t ->
@@ -420,6 +502,12 @@ class GridOverlayView @JvmOverloads constructor(
                 (200 * (1f - pulse)).toInt(), Color.red(col), Color.green(col), Color.blue(col)
             )
             canvas.drawCircle(tx, ty, base + pulse * 16f * d, pulsePaint)
+            labelPaint.color = col
+            val above = ty - base - 10f * d
+            canvas.drawText(
+                if (aligned) "Perfect" else "Put subject here",
+                tx, if (above > 20f * d) above else ty + base + 22f * d, labelPaint
+            )
         }
 
         val focusAge = now - focusTime
