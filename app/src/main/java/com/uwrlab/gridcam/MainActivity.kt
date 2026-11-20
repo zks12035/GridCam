@@ -144,7 +144,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 val padV = (8 * density).toInt()
                 setPadding(padH, padV, padH, padV)
                 setOnClickListener {
-                    overlay.userMode = mode
+                    this@MainActivity.overlay.userMode = mode
                     refreshChips()
                 }
             }
