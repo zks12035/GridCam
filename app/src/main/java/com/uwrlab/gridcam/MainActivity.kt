@@ -142,7 +142,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     private var manualShutterNs: Long? = null
     private var awbIndex = 0
     private var portraitF = 1.8f
-    private var naturalLook = true   // clean multi-frame "Sony-like" processing for Photo/Portrait
+    private var naturalLook = false  // optional clean multi-frame look (slower shutter); default = instant shot
     private var naturalSettingsOk = true   // false if this camera refused the low-processing settings
     private var pendingPortraitZoom = false
     @Volatile private var readout = ""
@@ -640,8 +640,8 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                         naturalLook = !naturalLook
                         Toast.makeText(
                             this,
-                            if (naturalLook) "Natural look: clean multi-frame photos, no phone over-sharpening"
-                            else "Phone look: single shot with the phone's normal processing",
+                            if (naturalLook) "Natural look: 5 frames merged, cleaner but slower. Hold still."
+                            else "Fast look: instant single shot",
                             Toast.LENGTH_LONG
                         ).show()
                         bindForMode()
@@ -1021,7 +1021,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         "Shutter" -> shutterSteps.firstOrNull { it.second == manualShutterNs }?.first ?: "Shutter Auto"
         "WB" -> "WB " + awbModes[awbIndex].first
         "Style" -> style.label
-        "Look" -> if (naturalLook) "Look: Natural" else "Look: Phone"
+        "Look" -> if (naturalLook) "Look: Natural (5 frames)" else "Look: Fast (1 shot)"
         else -> "f/" + portraitF
     }
 
@@ -1262,56 +1262,30 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         // 1. A new tap: pick the detected object under the finger, or follow the tapped spot
         pendingTap?.let { tap ->
             pendingTap = null
-            val hit = dets.filter { it.box.contains(tap.x, tap.y) }
-                .minByOrNull { it.box.width() * it.box.height() }
-                ?: dets.minByOrNull { Math.hypot((it.box.centerX() - tap.x).toDouble(), (it.box.centerY() - tap.y).toDouble()) }
-                    ?.takeIf { Math.hypot((it.box.centerX() - tap.x).toDouble(), (it.box.centerY() - tap.y).toDouble()) < 0.12 }
             runOnUiThread { overlay.clearSubject() }
             selected = true
             lostFrames = 0
-            if (hit != null) {
-                lockedId = hit.id
-                lockedBox = RectF(hit.box)
-                tracker.start(gray, hit.box.centerX(), hit.box.centerY())
-            } else {
-                lockedId = null
-                lockedBox = RectF(tap.x - 0.11f, tap.y - 0.08f, tap.x + 0.11f, tap.y + 0.08f)
-                tracker.start(gray, tap.x, tap.y)
-            }
+            lockedId = null   // don't hand the subject to the object detector (it may switch objects)
+            lockedBox = RectF(tap.x - 0.07f, tap.y - 0.05f, tap.x + 0.07f, tap.y + 0.05f)
+            tracker.start(gray, tap.x, tap.y)
         }
 
         autoBox = dets.maxByOrNull { it.box.width() * it.box.height() }?.box?.let { RectF(it) }
 
-        // 2. Follow the selected subject
+        // 2. Follow the tapped spot (pattern tracking); if it can't be found, stay where it was
         var box: RectF? = null
         if (selected) {
-            val id = lockedId
-            if (id != null) box = dets.firstOrNull { it.id == id }?.box
             val c = tracker.update(gray)
-            if (box != null) {
-                tracker.start(gray, box.centerX(), box.centerY())   // re-anchor on the detector's box
-            } else if (c != null) {
-                val old = lockedBox
-                if (old != null) {
-                    val hw = old.width() / 2f
-                    val hh = old.height() / 2f
-                    box = RectF(c[0] - hw, c[1] - hh, c[0] + hw, c[1] + hh)
-                }
-            }
-            if (box != null) {
+            val old = lockedBox
+            if (c != null && old != null) {
+                val hw = old.width() / 2f
+                val hh = old.height() / 2f
+                box = RectF(c[0] - hw, c[1] - hh, c[0] + hw, c[1] + hh)
                 lockedBox = RectF(box)
-                lostFrames = 0
                 val fb = RectF(box)
                 runOnUiThread { maybeRefocus(fb) }
-            } else if (++lostFrames > 30) {
-                selected = false
-                lockedBox = null
-                runOnUiThread {
-                    camera?.cameraControl?.cancelFocusAndMetering()
-                    Toast.makeText(this, "Subject lost. Tap it again.", Toast.LENGTH_SHORT).show()
-                }
             } else {
-                box = lockedBox   // keep the last position for a moment
+                box = old
             }
         }
 

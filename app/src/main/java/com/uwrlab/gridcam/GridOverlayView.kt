@@ -325,11 +325,13 @@ class GridOverlayView @JvmOverloads constructor(
         }
 
         if (s == null) {
-            target = null
+            val best = bestSpot(viewW(), viewH())
+            target = best
             aligned = false
+            val where = spotName(best)
             listener?.onGuidance(
-                activeMode, reason,
-                "Tap the object you want to photograph" + horizonHint(), false
+                activeMode, reason + " Best spot: $where.",
+                "Put your subject on the red circle ($where), then tap it to lock focus" + horizonHint(), false
             )
             return
         }
@@ -385,6 +387,40 @@ class GridOverlayView @JvmOverloads constructor(
             "Bring the yellow dot into the red circle: " + parts.joinToString(", ")
         } + horizonHint()
         listener?.onGuidance(activeMode, reason + sideNote, guidance, aligned)
+    }
+
+    /**
+     * Best grid point for the current grid when no subject is tapped yet:
+     * leaves open space on the emptier side and favours the upper points (eyes, heads, tops).
+     */
+    private fun bestSpot(w: Float, h: Float): PointF {
+        val open = scene?.openSide ?: 0f
+        val cands: List<PointF> = when (activeMode) {
+            GridMode.TRIANGLES -> trianglePoints(false, w, h) + trianglePoints(true, w, h)
+            else -> strongPoints(activeMode, w, h)
+        }
+        val best = cands.minByOrNull { p ->
+            var score = 0f
+            if (open > 0.1f && p.x > 0.55f) score += 1f      // right side is emptier -> subject left
+            if (open < -0.1f && p.x < 0.45f) score += 1f     // left side is emptier -> subject right
+            score += p.y * 0.6f                              // prefer upper points
+            score += abs(p.x - 0.5f) * 0.1f
+            score
+        } ?: PointF(0.5f, 0.5f)
+        if (activeMode == GridMode.TRIANGLES) {
+            trianglesMirrored = trianglePoints(true, w, h).any { abs(it.x - best.x) < 1e-3f && abs(it.y - best.y) < 1e-3f }
+        }
+        if (activeMode == GridMode.SPIRAL) {
+            spiralFlipX = abs(best.x - spiralEye.x) > 0.001f
+            spiralFlipY = abs(best.y - spiralEye.y) > 0.001f
+        }
+        return best
+    }
+
+    private fun spotName(p: PointF): String {
+        val v = when { p.y < 0.45f -> "upper"; p.y > 0.55f -> "lower"; else -> "middle" }
+        val hz = when { p.x < 0.45f -> "left"; p.x > 0.55f -> "right"; else -> "center" }
+        return if (v == "middle" && hz == "center") "center" else "$v-$hz"
     }
 
     private fun horizonHint(): String {
@@ -460,27 +496,19 @@ class GridOverlayView @JvmOverloads constructor(
         val now = SystemClock.uptimeMillis()
 
         subject?.let { s ->
-            val r = RectF(s.left * w, s.top * h, s.right * w, s.bottom * h)
-            canvas.drawRoundRect(r, 10f * d, 10f * d, subjectPaint)
+            // Pixel-style: a focus ring on the tapped spot (it follows that spot, nothing else)
+            val fx = s.centerX() * w
+            val fy = s.centerY() * h
             val t = target
             if (t != null && !aligned) {
-                canvas.drawLine(r.centerX(), r.centerY(), t.x * w, t.y * h, linkPaint)
+                canvas.drawLine(fx, fy, t.x * w, t.y * h, linkPaint)
             }
-            canvas.drawCircle(r.centerX(), r.centerY(), 7f * d, subjectFill)
-            // focus brackets: the camera keeps focus here
-            val fx = r.centerX()
-            val fy = r.centerY()
-            val q = 20f * d
-            val l = 7f * d
-            for (sx in intArrayOf(-1, 1)) for (sy in intArrayOf(-1, 1)) {
-                canvas.drawLine(fx + sx * q, fy + sy * q, fx + sx * (q - l), fy + sy * q, focusBracket)
-                canvas.drawLine(fx + sx * q, fy + sy * q, fx + sx * q, fy + sy * (q - l), focusBracket)
-            }
-            val tgt = target
-            val nearTarget = tgt != null && hypot(tgt.x * w - fx, tgt.y * h - fy) < 90f * d
-            if (!nearTarget) { // avoid text on top of the red circle's label
+            canvas.drawCircle(fx, fy, 30f * d, focusBracket)
+            canvas.drawCircle(fx, fy, 5f * d, subjectFill)
+            val nearTarget = t != null && hypot(t.x * w - fx, t.y * h - fy) < 90f * d
+            if (!nearTarget) {
                 labelPaint.color = Color.WHITE
-                canvas.drawText("Focus", fx, fy + q + 16f * d, labelPaint)
+                canvas.drawText("Focus locked", fx, fy + 30f * d + 18f * d, labelPaint)
             }
         }
 
@@ -503,7 +531,7 @@ class GridOverlayView @JvmOverloads constructor(
             labelPaint.color = col
             val above = ty - base - 10f * d
             canvas.drawText(
-                if (aligned) "Perfect" else "Put subject here",
+                if (aligned) "Perfect" else if (subject == null) "Best spot" else "Put subject here",
                 tx, if (above > 20f * d) above else ty + base + 22f * d, labelPaint
             )
         }
