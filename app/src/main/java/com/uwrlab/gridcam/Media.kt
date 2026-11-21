@@ -16,6 +16,7 @@ import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sqrt
 
 /** One photo or video saved by Grid Cam. */
@@ -118,12 +119,15 @@ object PortraitMaker {
     fun make(context: Context, src: Bitmap, subject: RectF?, fNumber: Float = 1.8f, topDown: Boolean = false): Bitmap {
         val w = src.width
         val h = src.height
-        val mask = chooseMask(segmentMask(src), w, h, subject)
+        val mask = refineMask(chooseMask(segmentMask(src), w, h, subject), w, h, subject)
         val dm = depthMap(src, mask, subject, topDown)
 
+        // blur a copy where the subject is painted over with nearby background,
+        // so the subject's colours don't leak into the bokeh as a dark/bright halo
+        val bgSrc = try { fillSubject(src, mask) } catch (e: OutOfMemoryError) { src }
         val radius = LensBlur.radiusFor(fNumber) * (if (topDown) 0.6f else 1f)
-        val full = try { LensBlur.apply(src, radius) } catch (e: OutOfMemoryError) { blur(src) }
-        val light = try { LensBlur.soft(src, radius * 0.5f) } catch (e: OutOfMemoryError) { full }
+        val full = try { LensBlur.apply(bgSrc, radius) } catch (e: OutOfMemoryError) { blur(bgSrc) }
+        val light = try { LensBlur.soft(bgSrc, radius * 0.5f) } catch (e: OutOfMemoryError) { full }
 
         val sp = IntArray(w * h)
         val fp = IntArray(w * h)
@@ -137,7 +141,8 @@ object PortraitMaker {
                 val i = y * w + x
                 val sx = (x * dm.w / w).coerceIn(0, dm.w - 1)
                 val d = dm.v[sy * dm.w + sx]                 // 0 = same distance as subject, 1 = far
-                val keep = mask[i].coerceIn(0f, 1f)
+                // sharp at subject distance even if the cut-out missed it (whole bottle, not half)
+                val keep = max(mask[i], (1f - d * 4f)).coerceIn(0f, 1f)
                 val s0 = sp[i]
                 val l = lp[i]
                 val f = fp[i]
@@ -168,6 +173,133 @@ object PortraitMaker {
     }
 
     class DepthMap(val v: FloatArray, val w: Int, val h: Int)
+
+    /**
+     * Cleans the cut-out:
+     *  - keeps only the piece connected to the chosen subject (no half-sharp neighbours with
+     *    jagged edges, like the second bottle);
+     *  - smooths the stair-step edge into a soft, natural roll-off.
+     */
+    private fun refineMask(mask: FloatArray, w: Int, h: Int, subject: RectF?): FloatArray {
+        val f = 4
+        val sw = max(1, w / f)
+        val sh = max(1, h / f)
+        val small = FloatArray(sw * sh)
+        for (y in 0 until sh) for (x in 0 until sw) {
+            small[y * sw + x] = mask[(min(h - 1, y * f + f / 2)) * w + min(w - 1, x * f + f / 2)]
+        }
+        // connected piece(s) touching the subject box (or the biggest piece)
+        val keep = BooleanArray(sw * sh)
+        val seen = BooleanArray(sw * sh)
+        val queue = IntArray(sw * sh)
+        fun flood(start: Int, mark: BooleanArray?): Int {
+            var head = 0; var tail = 0; var n = 0
+            queue[tail++] = start; seen[start] = true
+            while (head < tail) {
+                val i = queue[head++]; n++
+                mark?.set(i, true)
+                val x = i % sw; val y = i / sw
+                if (x > 0) { val j = i - 1; if (!seen[j] && small[j] > 0.35f) { seen[j] = true; queue[tail++] = j } }
+                if (x < sw - 1) { val j = i + 1; if (!seen[j] && small[j] > 0.35f) { seen[j] = true; queue[tail++] = j } }
+                if (y > 0) { val j = i - sw; if (!seen[j] && small[j] > 0.35f) { seen[j] = true; queue[tail++] = j } }
+                if (y < sh - 1) { val j = i + sw; if (!seen[j] && small[j] > 0.35f) { seen[j] = true; queue[tail++] = j } }
+            }
+            return n
+        }
+        if (subject != null) {
+            val l = (subject.left * sw).toInt().coerceIn(0, sw - 1)
+            val r = (subject.right * sw).toInt().coerceIn(l + 1, sw)
+            val t = (subject.top * sh).toInt().coerceIn(0, sh - 1)
+            val b = (subject.bottom * sh).toInt().coerceIn(t + 1, sh)
+            for (y in t until b) for (x in l until r) {
+                val i = y * sw + x
+                if (!seen[i] && small[i] > 0.35f) flood(i, keep)
+            }
+        }
+        if (keep.none { it }) {
+            // no box: keep the biggest piece
+            java.util.Arrays.fill(seen, false)
+            var best = -1; var bestN = 0
+            for (i in 0 until sw * sh) if (!seen[i] && small[i] > 0.35f) {
+                val n = flood(i, null); if (n > bestN) { bestN = n; best = i }
+            }
+            if (best < 0) return mask
+            java.util.Arrays.fill(seen, false)
+            flood(best, keep)
+        }
+        // grow the kept area a little so its own soft edge is not cut, then make it soft
+        val gate = FloatArray(sw * sh) { if (keep[it]) 1f else 0f }
+        LensBlur.boxBlur(gate, sw, sh, 3)
+        for (i in gate.indices) gate[i] = (gate[i] * 3f).coerceAtMost(1f)
+        // smooth edge: blurred copy of the cut-out at low resolution
+        val soft = small.copyOf()
+        LensBlur.boxBlur(soft, sw, sh, 1)
+        val out = FloatArray(w * h)
+        for (y in 0 until h) {
+            val fy = ((y + 0.5f) / f - 0.5f).coerceIn(0f, (sh - 1).toFloat())
+            val y0 = fy.toInt(); val y1 = min(sh - 1, y0 + 1); val ty = fy - y0
+            for (x in 0 until w) {
+                val fx = ((x + 0.5f) / f - 0.5f).coerceIn(0f, (sw - 1).toFloat())
+                val x0 = fx.toInt(); val x1 = min(sw - 1, x0 + 1); val tx = fx - x0
+                val a = y0 * sw + x0; val b = y0 * sw + x1; val c0 = y1 * sw + x0; val d = y1 * sw + x1
+                val w00 = (1 - tx) * (1 - ty); val w01 = tx * (1 - ty); val w10 = (1 - tx) * ty; val w11 = tx * ty
+                val sv = soft[a] * w00 + soft[b] * w01 + soft[c0] * w10 + soft[d] * w11
+                val gv = gate[a] * w00 + gate[b] * w01 + gate[c0] * w10 + gate[d] * w11
+                val i = y * w + x
+                // fine detail from the original mask inside, smooth roll-off at the border
+                val m = mask[i] * 0.5f + sv * 0.5f
+                // contrast curve: solid inside, short soft edge
+                val c = ((m - 0.3f) / 0.4f).coerceIn(0f, 1f)
+                out[i] = c * c * (3 - 2 * c) * gv
+            }
+        }
+        return out
+    }
+
+    /** Replaces subject pixels with the surrounding background colours (mask-weighted blur). */
+    private fun fillSubject(src: Bitmap, mask: FloatArray): Bitmap {
+        val w = src.width
+        val h = src.height
+        val f = 8
+        val sw = max(1, w / f)
+        val sh = max(1, h / f)
+        val small = Bitmap.createScaledBitmap(src, sw, sh, true)
+        val px = IntArray(sw * sh)
+        small.getPixels(px, 0, sw, 0, 0, sw, sh)
+        val wr = FloatArray(sw * sh); val wg = FloatArray(sw * sh); val wb = FloatArray(sw * sh); val ww = FloatArray(sw * sh)
+        for (y in 0 until sh) for (x in 0 until sw) {
+            val i = y * sw + x
+            val m = mask[min(h - 1, y * f + f / 2) * w + min(w - 1, x * f + f / 2)]
+            val bgw = ((0.6f - m) / 0.6f).coerceIn(0f, 1f)   // only clear background counts
+            wr[i] = Color.red(px[i]) * bgw; wg[i] = Color.green(px[i]) * bgw; wb[i] = Color.blue(px[i]) * bgw; ww[i] = bgw
+        }
+        var rad = 2
+        repeat(4) {
+            LensBlur.boxBlur(wr, sw, sh, rad); LensBlur.boxBlur(wg, sw, sh, rad)
+            LensBlur.boxBlur(wb, sw, sh, rad); LensBlur.boxBlur(ww, sw, sh, rad)
+            rad *= 2
+        }
+        val fill = IntArray(sw * sh) {
+            val n = ww[it]
+            if (n < 1e-4f) px[it] else Color.rgb((wr[it] / n).toInt().coerceIn(0, 255), (wg[it] / n).toInt().coerceIn(0, 255), (wb[it] / n).toInt().coerceIn(0, 255))
+        }
+        val fillBmp = Bitmap.createScaledBitmap(Bitmap.createBitmap(fill, sw, sh, Bitmap.Config.ARGB_8888), w, h, true)
+        val sp = IntArray(w * h)
+        val fp = IntArray(w * h)
+        src.getPixels(sp, 0, w, 0, 0, w, h)
+        fillBmp.getPixels(fp, 0, w, 0, 0, w, h)
+        for (i in sp.indices) {
+            val m = (mask[i] * 1.6f).coerceIn(0f, 1f)        // cover the edge too
+            if (m <= 0f) continue
+            val a = sp[i]; val b = fp[i]
+            sp[i] = Color.rgb(
+                (Color.red(a) + (Color.red(b) - Color.red(a)) * m).toInt(),
+                (Color.green(a) + (Color.green(b) - Color.green(a)) * m).toInt(),
+                (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * m).toInt()
+            )
+        }
+        return Bitmap.createBitmap(sp, w, h, Bitmap.Config.ARGB_8888)
+    }
 
     /**
      * Distance guess without a depth sensor:
@@ -202,29 +334,65 @@ object PortraitMaker {
             if (m > 0.5f) subj.add(e[y * sw + x])
         }
         val refRaw = if (subj.size > 50) {
-            subj.sort(); subj[(subj.size * 0.75f).toInt().coerceIn(0, subj.size - 1)]
+            subj.sort(); subj[(subj.size * 0.5f).toInt().coerceIn(0, subj.size - 1)]
         } else {
             val all = e.copyOf(); all.sort(); all[(all.size * 0.9f).toInt().coerceIn(0, all.size - 1)]
         }
         val ref = refRaw.coerceAtLeast(0.004f)
 
-        val top = subject?.top ?: maskTop(mask, w, h)
+        // the whole subject (top to bottom), from the tapped box or the cut-out
+        // union: a small tapped box + the full cut-out connected to it = the whole object
+        val box = RectF(maskBounds(mask, w, h)).also { if (subject != null) it.union(subject) }
+        val top = box.top
+        val bottom = box.bottom
         val d = FloatArray(sw * sh)
         for (y in 0 until sh) {
             val ny = y.toFloat() / sh
-            val prior = if (!topDown) ((top - ny) / 0.2f).coerceIn(0f, 1f) * 0.85f else 0f
+            // like a real lens on a table/floor scene:
+            //  above the subject = farther away (strong blur),
+            //  level with the subject's base = same distance (sharp),
+            //  below it = closer to the camera (gentle foreground blur)
+            val prior = when {
+                topDown -> 0f
+                ny < top -> ((top - ny) / 0.2f).coerceIn(0f, 1f) * 0.85f
+                ny > bottom -> ((ny - bottom) / 0.35f).coerceIn(0f, 1f) * 0.5f
+                else -> 0f
+            }
             for (x in 0 until sw) {
+                val nx = x.toFloat() / sw
                 val i = y * sw + x
                 val ratio = e[i] / ref
-                val soft = ((0.7f - ratio) / 0.45f).coerceIn(0f, 1f)
-                var v = max(soft, prior)
+                // as crisp as the subject -> same distance -> stays sharp (like Pixel's notebook)
+                val soft = ((0.55f - ratio) / 0.4f).coerceIn(0f, 1f)
+                var v = if (ny > bottom) max(soft * 0.6f, prior) else max(soft, prior)
+                // inside the subject's own box keep it sharp even where it has no texture
+                // (clear plastic, plain clothes), so the whole object stays in focus
+                if (nx in box.left..box.right && ny in top..bottom) v *= 0.15f
                 if (topDown) v *= 0.45f
                 d[i] = v
             }
         }
-        LensBlur.boxBlur(d, sw, sh, 6)
-        LensBlur.boxBlur(d, sw, sh, 6)
+        LensBlur.boxBlur(d, sw, sh, 4)
+        LensBlur.boxBlur(d, sw, sh, 4)
         return DepthMap(d, sw, sh)
+    }
+
+    /** Bounding box (0..1) of the cut-out, or a centre box if there is none. */
+    private fun maskBounds(mask: FloatArray, w: Int, h: Int): RectF {
+        var l = w; var r = -1; var t = h; var b = -1
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                if (mask[y * w + x] > 0.5f) {
+                    if (x < l) l = x; if (x > r) r = x; if (y < t) t = y; if (y > b) b = y
+                }
+                x += 4
+            }
+            y += 4
+        }
+        if (r < 0) return RectF(0.3f, 0.3f, 0.7f, 0.75f)
+        return RectF(l.toFloat() / w, t.toFloat() / h, r.toFloat() / w, b.toFloat() / h)
     }
 
     /** Highest row (0..1) where the mask is mostly subject. */
