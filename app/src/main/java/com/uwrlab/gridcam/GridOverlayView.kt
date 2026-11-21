@@ -244,6 +244,9 @@ class GridOverlayView @JvmOverloads constructor(
         horizonScreenY = horizonY
     }
 
+    /** Name of the grid currently shown (saved with each photo). */
+    fun activeGridLabel(): String = activeMode.label
+
     /** Clears the selected subject immediately. */
     fun clearSubject() {
         subject = null

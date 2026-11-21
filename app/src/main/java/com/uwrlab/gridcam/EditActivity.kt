@@ -29,7 +29,7 @@ import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-/** Opens after a photo is taken: shows Lightroom tips and simple in-app editing. */
+/** Shows a saved photo with Snapseed edit instructions, plus a quick in-app editor. */
 class EditActivity : AppCompatActivity() {
 
     private lateinit var imageView: ImageView
@@ -44,6 +44,9 @@ class EditActivity : AppCompatActivity() {
     private var autoValues = FloatArray(EDIT_NAMES.size)
     private val values = FloatArray(EDIT_NAMES.size)
     private var shotTilt = 0f
+    private var gridUsed = ""
+    private var modeUsed = ""
+    private lateinit var infoText: TextView
 
     private lateinit var worker: ExecutorService
     @Volatile private var renderVersion = 0
@@ -56,7 +59,7 @@ class EditActivity : AppCompatActivity() {
             finish()
             return
         }
-        shotTilt = intent.getFloatExtra("tilt", 0f)
+        shotTilt = intent.getFloatExtra("tilt", Float.NaN)
         worker = Executors.newSingleThreadExecutor()
         setContentView(buildUi())
         loadPhoto()
@@ -72,10 +75,16 @@ class EditActivity : AppCompatActivity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "Review & edit"
+            text = "Photo & edit guide"
             setTextColor(Color.WHITE)
             textSize = 20f
         })
+        infoText = TextView(this).apply {
+            text = ""
+            setTextColor(Color.argb(180, 255, 255, 255))
+            textSize = 13f
+        }
+        root.addView(infoText)
 
         imageView = ImageView(this).apply {
             adjustViewBounds = true
@@ -92,27 +101,18 @@ class EditActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(12) })
 
-        root.addView(TextView(this).apply {
-            text = "Touch and hold the photo to see the original"
-            setTextColor(Color.argb(160, 255, 255, 255))
-            textSize = 12f
-            gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, dp(6))
-        })
-
-        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row1.addView(button("Auto fix") { setValues(autoValues) }, weightLp())
-        row1.addView(button("Reset") { setValues(FloatArray(EDIT_NAMES.size)) }, weightLp())
-        root.addView(row1)
-
-        for (i in EDIT_NAMES.indices) root.addView(sliderRow(i))
-
-        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row2.addView(button("Save edited copy") { saveEdited() }, weightLp())
-        row2.addView(button("Open in Lightroom") { openInLightroom() }, weightLp())
-        root.addView(row2, LinearLayout.LayoutParams(
+        val rowA = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        rowA.addView(button("Open in Snapseed") { openInSnapseed() }, weightLp())
+        rowA.addView(button("Google Photos") { openInPhotos() }, weightLp())
+        root.addView(rowA, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(8) })
+        val rowB = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        rowB.addView(button("Share") { sharePhoto() }, weightLp())
+        rowB.addView(button("All Grid Cam photos") {
+            startActivity(Intent(this@EditActivity, GalleryActivity::class.java))
+        }, weightLp())
+        root.addView(rowB)
 
         tipsText = TextView(this).apply {
             text = "Analysing photo..."
@@ -127,7 +127,24 @@ class EditActivity : AppCompatActivity() {
         }
         root.addView(tipsText, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(16) })
+        ).apply { topMargin = dp(12) })
+
+        root.addView(TextView(this).apply {
+            text = "Quick edit in Grid Cam (touch and hold the photo to compare)"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            setPadding(0, dp(18), 0, dp(4))
+        })
+        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row1.addView(button("Auto fix") { setValues(autoValues) }, weightLp())
+        row1.addView(button("Reset") { setValues(FloatArray(EDIT_NAMES.size)) }, weightLp())
+        root.addView(row1)
+
+        for (i in EDIT_NAMES.indices) root.addView(sliderRow(i))
+
+        root.addView(button("Save edited copy") { saveEdited() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(8) })
 
         root.addView(button("Back to camera") { finish() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -229,8 +246,17 @@ class EditActivity : AppCompatActivity() {
                 val small = if (scale < 1f) Bitmap.createScaledBitmap(
                     full, (full.width * scale).toInt(), (full.height * scale).toInt(), true
                 ) else full
-                val report = PhotoAnalyzer.analyze(small, shotTilt)
+                val info = MediaHelper.readInfo(contentResolver, uri)
+                if (shotTilt.isNaN()) shotTilt = info["tilt"]?.toFloatOrNull() ?: 0f
+                gridUsed = info["grid"] ?: ""
+                modeUsed = info["mode"] ?: ""
+                val report = PhotoAnalyzer.analyze(small, shotTilt, gridUsed, modeUsed)
                 runOnUiThread {
+                    infoText.text = buildString {
+                        if (modeUsed.isNotEmpty()) append("Mode: ").append(modeUsed)
+                        if (gridUsed.isNotEmpty()) append(if (isEmpty()) "" else "  ·  ").append("Grid: ").append(gridUsed)
+                        if (isEmpty()) append("Photo")
+                    }
                     original = full
                     previewSrc = small
                     edited = null
@@ -272,7 +298,11 @@ class EditActivity : AppCompatActivity() {
                 val cv = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                     put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/GridCam")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, MediaHelper.PHOTO_DIR)
+                    put(
+                        MediaStore.Images.ImageColumns.DESCRIPTION,
+                        MediaHelper.makeInfo(0f, gridUsed, "Edited in Grid Cam")
+                    )
                 }
                 val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
                     ?: throw IllegalStateException("No storage")
@@ -286,19 +316,53 @@ class EditActivity : AppCompatActivity() {
         }
     }
 
-    private fun openInLightroom() {
+    private fun openInSnapseed() {
         val uri = photoUri ?: return
-        val send = Intent(Intent.ACTION_SEND).apply {
-            type = "image/jpeg"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
+        val pkg = "com.niksoftware.snapseed"
+        val edit = Intent(Intent.ACTION_EDIT).setDataAndType(uri, "image/jpeg")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            .setPackage(pkg)
+        val send = Intent(Intent.ACTION_SEND).setType("image/jpeg")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            .setPackage(pkg)
         try {
-            startActivity(Intent(send).setPackage("com.adobe.lrmobile"))
+            startActivity(edit)
         } catch (e: ActivityNotFoundException) {
-            Toast.makeText(this, "Lightroom not installed. Choose another app.", Toast.LENGTH_SHORT).show()
-            startActivity(Intent.createChooser(send, "Edit photo with"))
+            try {
+                startActivity(send)
+            } catch (e2: ActivityNotFoundException) {
+                Toast.makeText(this, "Snapseed is not installed. Opening Play Store.", Toast.LENGTH_SHORT).show()
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$pkg")))
+                } catch (e3: ActivityNotFoundException) {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$pkg")))
+                }
+            }
         }
+    }
+
+    private fun openInPhotos() {
+        val uri = photoUri ?: return
+        val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, "image/*")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            startActivity(Intent(view).setPackage("com.google.android.apps.photos"))
+        } catch (e: ActivityNotFoundException) {
+            try {
+                startActivity(view)
+            } catch (e2: ActivityNotFoundException) {
+                Toast.makeText(this, "No gallery app found", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun sharePhoto() {
+        val uri = photoUri ?: return
+        val send = Intent(Intent.ACTION_SEND).setType("image/jpeg")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent.createChooser(send, "Share photo"))
     }
 
     override fun onDestroy() {

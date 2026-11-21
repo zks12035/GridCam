@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.uwrlab.gridcam"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.uwrlab.gridcam"
@@ -40,11 +40,12 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+        freeCompilerArgs += listOf("-opt-in=androidx.camera.camera2.interop.ExperimentalCamera2Interop")
     }
 }
 
 dependencies {
-    val camerax = "1.4.1"
+    val camerax = "1.5.1"
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
@@ -53,5 +54,8 @@ dependencies {
     implementation("androidx.camera:camera-camera2:$camerax")
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
+    implementation("androidx.camera:camera-video:$camerax")
+    implementation("androidx.camera:camera-extensions:$camerax")
     implementation("com.google.mlkit:object-detection:17.0.2")
+    implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
 }

@@ -21,7 +21,7 @@ class PhotoReport(val tips: String, val auto: FloatArray)
 
 object PhotoAnalyzer {
 
-    fun analyze(src: Bitmap, tiltDeg: Float = 0f): PhotoReport {
+    fun analyze(src: Bitmap, tiltDeg: Float = 0f, grid: String = "", mode: String = ""): PhotoReport {
         val sw = 200
         val sh = max(1, (sw.toFloat() * src.height / src.width).toInt())
         val small = Bitmap.createScaledBitmap(src, sw, sh, true)
@@ -57,75 +57,87 @@ object PhotoAnalyzer {
         val rb = (rbSum / n).toFloat()
 
         val auto = FloatArray(EDIT_NAMES.size)
-        val light = ArrayList<String>()
-        val color = ArrayList<String>()
+        val tune = ArrayList<String>()   // Snapseed: Tools > Tune image
+        val wb = ArrayList<String>()     // Snapseed: Tools > White balance
 
-        // Exposure
+        // Brightness
         val ev = (ln(0.46f / max(mean, 0.02f)) / ln(2f)).coerceIn(-1.5f, 1.5f)
         if (abs(ev) >= 0.15f) {
             auto[0] = ev / 1.5f
-            light.add(
-                "Exposure ${sign1(ev)}: photo is ${if (ev > 0) "too dark" else "too bright"} " +
-                        "(average brightness ${(mean * 100).roundToInt()}%)."
-            )
+            val b = (ev * 35f).coerceIn(-60f, 60f)
+            tune.add("Brightness ${sign0(b)}: photo is ${if (ev > 0) "too dark" else "too bright"} (average ${(mean * 100).roundToInt()}%).")
         }
         // Highlights
         if (hiPct > 0.02f) {
             auto[2] = -min(0.8f, hiPct * 10f + 0.2f)
-            light.add("Highlights ${sign0(auto[2] * 100)}: ${pct(hiPct)} of the photo is burnt white (sky, lights). Pull it down to bring detail back.")
+            tune.add("Highlights ${sign0(auto[2] * 100)}: ${pct(hiPct)} is burnt white (sky, lights). Brings detail back.")
         }
         // Shadows
         if (loPct > 0.03f) {
             auto[3] = min(0.8f, loPct * 8f + 0.2f)
-            light.add("Shadows ${sign0(auto[3] * 100)}: ${pct(loPct)} is nearly black. Lift shadows to reveal hidden detail.")
+            tune.add("Shadows ${sign0(auto[3] * 100)}: ${pct(loPct)} is nearly black. Reveals hidden detail.")
         }
-        // Contrast
+        // Contrast / Ambiance
         if (std < 0.16f) {
             auto[1] = 0.25f
-            light.add("Contrast +25: the photo looks flat/hazy.")
-            if (hiPct < 0.002f && loPct < 0.002f) light.add("Whites +15 and Blacks -15: gives the image punch without clipping.")
+            tune.add("Contrast +25 and Ambiance +15: the photo looks flat or hazy.")
         } else if (std > 0.30f) {
             auto[1] = -0.15f
-            light.add("Contrast -15: the photo is very harsh; soften it a little.")
-        }
-        // White balance
-        if (rb > 0.06f) {
-            auto[4] = -min(0.6f, (rb - 0.03f) * 4f)
-            color.add("Temp ${sign0(auto[4] * 100)} (cooler): the photo looks too yellow/orange.")
-        } else if (rb < -0.03f) {
-            auto[4] = min(0.6f, -rb * 4f)
-            color.add("Temp ${sign0(auto[4] * 100)} (warmer): the photo looks too blue/cold.")
+            tune.add("Contrast -15: the photo is very harsh.")
         }
         // Saturation
         if (sat < 0.18f) {
             auto[5] = 0.25f
-            color.add("Vibrance +25: colours are dull. Vibrance boosts weak colours without overdoing skin.")
+            tune.add("Saturation +20 (or Ambiance +20): colours are dull.")
         } else if (sat > 0.55f) {
             auto[5] = -0.15f
-            color.add("Saturation -15: colours are too strong.")
+            tune.add("Saturation -15: colours are too strong.")
+        }
+        // White balance
+        if (rb > 0.06f) {
+            auto[4] = -min(0.6f, (rb - 0.03f) * 4f)
+            wb.add("Temperature ${sign0(auto[4] * 100)}: the photo looks too yellow/orange.")
+        } else if (rb < -0.03f) {
+            auto[4] = min(0.6f, -rb * 4f)
+            wb.add("Temperature ${sign0(auto[4] * 100)}: the photo looks too blue/cold.")
         }
 
         val sb = StringBuilder()
         sb.append("Photo check\n")
         sb.append("Brightness ${(mean * 100).roundToInt()}%  ·  Contrast ${(std * 100).roundToInt()}  ·  ")
-        sb.append("Colour ${(sat * 100).roundToInt()}%  ·  ${if (rb > 0.06f) "Warm" else if (rb < -0.03f) "Cool" else "Neutral"}\n\n")
-        sb.append("Lightroom: Edit > Light\n")
-        if (light.isEmpty()) sb.append("• Light looks well balanced. No change needed.\n")
-        else light.forEach { sb.append("• ").append(it).append('\n') }
-        sb.append("\nLightroom: Edit > Color\n")
-        if (color.isEmpty()) sb.append("• Colour and white balance look natural.\n")
-        else color.forEach { sb.append("• ").append(it).append('\n') }
-        sb.append("\nLightroom: Effects & Crop\n")
+        sb.append("Colour ${(sat * 100).roundToInt()}%  ·  ${if (rb > 0.06f) "Warm" else if (rb < -0.03f) "Cool" else "Neutral"}\n")
+        if (grid.isNotEmpty()) sb.append("Taken with the $grid grid: keep the subject on its point when you crop.\n")
+        sb.append("\nIn Snapseed, tap Tools, pick the tool, swipe up/down to choose a setting and left/right to change it, then tap ✓.\n")
+
+        sb.append("\n1. Tools > Tune image\n")
+        if (tune.isEmpty()) sb.append("• Light and colour look balanced. Skip this step.\n")
+        else tune.forEach { sb.append("• ").append(it).append('\n') }
+
+        sb.append("\n2. Tools > White balance\n")
+        if (wb.isEmpty()) sb.append("• Colours look natural. Skip this step.\n")
+        else wb.forEach { sb.append("• ").append(it).append('\n') }
+
+        sb.append("\n3. Tools > Rotate / Crop\n")
         if (abs(tiltDeg) >= 0.5f) {
             auto[6] = (tiltDeg / 15f).coerceIn(-1f, 1f)
-            sb.append("• Crop > Straighten ${sign1(tiltDeg)}°: the phone was ${String.format("%.1f", abs(tiltDeg))}° off level when you took it (Auto fix does this).\n")
+            sb.append("• Rotate ${sign1(tiltDeg)}°: the phone was ${String.format("%.1f", abs(tiltDeg))}° off level. Snapseed's Rotate tool usually levels it automatically.\n")
         } else {
-            sb.append("• Horizon is level. No straightening needed.\n")
+            sb.append("• Horizon is level. No rotation needed.\n")
         }
-        sb.append("• Clarity +10 to +15 for landscapes and buildings; Texture -10 to soften skin in portraits.\n")
-        sb.append("• Vignette -10 to pull the eye toward your subject.\n")
-        sb.append("• Crop: keep the subject on the grid point the camera showed you; straighten the horizon.\n")
-        sb.append("\nTap Auto fix to apply these here, or Open in Lightroom to edit there.")
+        sb.append("• Crop: trim empty sky or ground and distractions at the edges.\n")
+
+        sb.append("\n4. Tools > Details\n")
+        sb.append("• Structure +10 to +20 for buildings and landscapes (keep 0 for faces). Sharpening +10.\n")
+
+        sb.append("\n5. Finishing touches\n")
+        sb.append("• Tools > Healing: brush over wires, litter or spots.\n")
+        sb.append("• Tools > Vignette: Outer brightness -20 to draw the eye to the subject.\n")
+        if (mode.startsWith("Portrait")) {
+            sb.append("• This is a portrait shot: use Tools > Portrait (Face spotlight +20, Skin smoothing +10) for faces.\n")
+        } else {
+            sb.append("• For a portrait look, Tools > Lens Blur: place the circle on the subject, Blur strength 40.\n")
+        }
+        sb.append("\nTap Open in Snapseed to edit there, or Auto fix to apply the main changes here.")
         return PhotoReport(sb.toString(), auto)
     }
 
