@@ -38,6 +38,15 @@
             android:exported="false"
             android:screenOrientation="portrait" />
         <activity
+            android:name=".ViewerActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.GridCam" />
+        <activity
+            android:name=".EditorActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+        <activity
             android:name=".EditActivity"
             android:exported="false"
             android:screenOrientation="portrait" />

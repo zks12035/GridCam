@@ -123,7 +123,7 @@ class GalleryActivity : AppCompatActivity() {
                 Toast.makeText(this, "No video player found", Toast.LENGTH_SHORT).show()
             }
         } else {
-            startActivity(Intent(this, EditActivity::class.java).setData(item.uri))
+            startActivity(Intent(this, ViewerActivity::class.java).setData(item.uri))
         }
     }
 

@@ -1205,7 +1205,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 startActivity(Intent(this, GalleryActivity::class.java))
             }
         } else {
-            startActivity(Intent(this, EditActivity::class.java).setData(item.uri))
+            startActivity(Intent(this, ViewerActivity::class.java).setData(item.uri))
         }
     }
 
