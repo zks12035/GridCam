@@ -221,6 +221,33 @@ class GridOverlayView @JvmOverloads constructor(
     // ---------- Public API ----------
 
     /** Called for every analyzed camera frame. [box] is normalized 0..1, or null. */
+    // ---- Pro overlays & helpers ----
+    /** Pro mode shows histogram + peaking; Simple mode keeps the screen clean. */
+    var proUi = false
+    /** 64-bin brightness histogram (0..1 heights), or null. */
+    var histogram: FloatArray? = null
+    /** Focus-peaking mask (red where sharp), drawn over the preview, or null. */
+    var peaking: Bitmap? = null
+    var peakingZoom = 1f
+    /** AE/AF lock badge. */
+    var aeAfLocked = false
+    /** Subject is a face: guidance puts the eyes on the upper third. */
+    var faceMode = false
+    /** Live composition score 0..100, -1 = no subject. */
+    var score = -1
+        private set
+    private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(120, 0, 0, 0) }
+    private val histPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(220, 255, 255, 255) }
+    private val badgeText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+
+    fun updateSubject(box: RectF?, isFace: Boolean) {
+        faceMode = isFace && box != null
+        updateSubject(box)
+    }
+
     fun updateSubject(box: RectF?) {
         if (box == null) {
             missedFrames++
@@ -325,6 +352,7 @@ class GridOverlayView @JvmOverloads constructor(
         }
 
         if (s == null) {
+            score = -1
             val best = bestSpot(viewW(), viewH())
             target = best
             aligned = false
@@ -349,7 +377,7 @@ class GridOverlayView @JvmOverloads constructor(
                 if (trianglesMirrored) b else a
             }
             else -> strongPoints(activeMode, w, h)
-        }
+        }.let { pts -> if (faceMode) pts.filter { it.y < 0.5f }.ifEmpty { pts } else pts }
         // Prefer the side that leaves empty space in front of the subject
         val open = scene?.openSide ?: 0f
         val sideAware = activeMode in setOf(
@@ -386,7 +414,76 @@ class GridOverlayView @JvmOverloads constructor(
             if (abs(dy) >= tol) parts.add(if (dy > 0) "tilt up ↑" else "tilt down ↓")
             "Bring the yellow dot into the red circle: " + parts.joinToString(", ")
         } + horizonHint()
-        listener?.onGuidance(activeMode, reason + sideNote, guidance, aligned)
+        score = composeScore(s, dx, dy)
+        val faceNote = if (faceMode) " Face found: keep the eyes on the upper third line." else ""
+        listener?.onGuidance(activeMode, reason + faceNote + sideNote, guidance, aligned)
+    }
+
+    /** 0..100: subject on its grid point, level horizon, horizon on a third, room around the subject. */
+    private fun composeScore(s: RectF, dx: Float, dy: Float): Int {
+        val place = (1f - hypot(dx, dy) / 0.35f).coerceIn(0f, 1f)
+        val tilt = if (rollDeg.isNaN() || flatMode) 0f else abs(residual())
+        val level = (1f - tilt / 8f).coerceIn(0f, 1f)
+        val hy = horizonScreenY
+        val horizon = if (hy.isNaN()) 1f else {
+            val d = minOf(abs(hy - 1f / 3f), abs(hy - 2f / 3f))
+            (1f - d / 0.17f).coerceIn(0f, 1f)
+        }
+        val margin = minOf(s.left, s.top, 1f - s.right, 1f - s.bottom)
+        val room = (margin / 0.04f).coerceIn(0f, 1f)
+        return (100f * (0.55f * place + 0.2f * level + 0.15f * horizon + 0.1f * room)).toInt()
+    }
+
+    /** Pro overlays: focus peaking, histogram; both modes: score badge and AE/AF lock. */
+    private fun drawExtras(c: Canvas, w: Float, h: Float) {
+        val pk = peaking
+        if (proUi && pk != null) {
+            c.save()
+            c.scale(peakingZoom, peakingZoom, w / 2f, h / 2f)
+            c.drawBitmap(pk, null, RectF(0f, 0f, w, h), null)
+            c.restore()
+        }
+        val hist = histogram
+        if (proUi && hist != null) {
+            val bw = 120f * d
+            val bh = 56f * d
+            val left = 10f * d
+            val top = 84f * d
+            c.drawRoundRect(left, top, left + bw, top + bh, 8f * d, 8f * d, boxPaint)
+            val step = bw / hist.size
+            for (i in hist.indices) {
+                val hh = hist[i] * (bh - 8f * d)
+                c.drawRect(left + i * step, top + bh - 4f * d - hh, left + (i + 1) * step, top + bh - 4f * d, histPaint)
+            }
+        }
+        if (score >= 0) {
+            val col = when {
+                score >= 80 -> Color.rgb(0, 200, 110)
+                score >= 60 -> Color.rgb(255, 196, 0)
+                else -> Color.rgb(255, 82, 82)
+            }
+            val cx = w - 44f * d
+            val cy = 104f * d
+            val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(150, 0, 0, 0) }
+            c.drawCircle(cx, cy, 26f * d, bg)
+            val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = col; style = Paint.Style.STROKE; strokeWidth = 3f * d }
+            c.drawArc(RectF(cx - 24f * d, cy - 24f * d, cx + 24f * d, cy + 24f * d), -90f, 360f * score / 100f, false, ring)
+            badgeText.color = Color.WHITE
+            badgeText.textSize = 16f * d
+            c.drawText(score.toString(), cx, cy + 6f * d, badgeText)
+            badgeText.textSize = 10f * d
+            c.drawText("score", cx, cy + 40f * d, badgeText)
+        }
+        if (aeAfLocked) {
+            val tw = 120f * d
+            val left = (w - tw) / 2f
+            val top = h - 120f * d
+            val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(255, 214, 0) }
+            c.drawRoundRect(left, top, left + tw, top + 28f * d, 14f * d, 14f * d, bg)
+            badgeText.color = Color.BLACK
+            badgeText.textSize = 13f * d
+            c.drawText("AE/AF LOCK", w / 2f, top + 19f * d, badgeText)
+        }
     }
 
     /**
@@ -489,6 +586,7 @@ class GridOverlayView @JvmOverloads constructor(
             canvas.drawLine(0f, horizonScreenY * h, w, horizonScreenY * h, horizonPaint)
         }
         drawLevel(canvas, w, h)
+        drawExtras(canvas, w, h)
 
         val pts = if (activeMode == GridMode.SPIRAL) listOf(currentEye()) else strongPoints(activeMode, w, h)
         for (p in pts) canvas.drawCircle(p.x * w, p.y * h, 4f * d, dotPaint)

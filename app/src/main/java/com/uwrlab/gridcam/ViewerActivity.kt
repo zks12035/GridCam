@@ -92,14 +92,25 @@ class ViewerActivity : AppCompatActivity() {
         for ((glyph, label) in listOf(
             "✎" to "Edit", "ⓘ" to "Guide", "◎" to "Snapseed", "▣" to "Photos", "⇪" to "Share", "✕" to "Delete"
         )) {
-            bar.addView(TextView(this).apply {
-                text = "$glyph\n$label"
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                textSize = 12f
-                setTextColor(Color.WHITE)
-                setPadding(0, dp(4), 0, dp(4))
+                setPadding(0, dp(6), 0, dp(6))
                 setOnClickListener { onIcon(label) }
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            }
+            cell.addView(TextView(this).apply {
+                text = glyph
+                textSize = 30f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+            })
+            cell.addView(TextView(this).apply {
+                text = label
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+            })
+            bar.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
         root.addView(bar, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM
@@ -148,7 +159,7 @@ class ViewerActivity : AppCompatActivity() {
         val item = current() ?: return
         when (label) {
             "Edit" -> {
-                if (item.isVideo) { Toast.makeText(this, "Editing is for photos", Toast.LENGTH_SHORT).show(); return }
+                if (item.isVideo) { startActivity(Intent(this, VideoTrimActivity::class.java).setData(item.uri)); return }
                 editLauncher.launch(Intent(this, EditorActivity::class.java).setData(item.uri))
             }
             "Guide" -> {
@@ -229,7 +240,7 @@ class ViewerActivity : AppCompatActivity() {
         }
     }
 
-    private class PageHolder(val frame: FrameLayout, val image: ImageView, val play: TextView) :
+    private class PageHolder(val frame: FrameLayout, val image: ZoomImageView, val play: TextView) :
         RecyclerView.ViewHolder(frame)
 
     private inner class PageAdapter : RecyclerView.Adapter<PageHolder>() {
@@ -238,7 +249,7 @@ class ViewerActivity : AppCompatActivity() {
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageHolder {
             val frame = FrameLayout(parent.context)
             frame.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            val img = ImageView(parent.context).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+            val img = ZoomImageView(parent.context)
             frame.addView(img, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             val play = TextView(parent.context).apply {
                 text = "▶"

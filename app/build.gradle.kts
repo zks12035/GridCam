@@ -60,5 +60,6 @@ dependencies {
     implementation("androidx.camera:camera-video:$camerax")
     implementation("androidx.camera:camera-extensions:$camerax")
     implementation("com.google.mlkit:object-detection:17.0.2")
+    implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
 }

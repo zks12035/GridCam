@@ -338,3 +338,97 @@ object LensBlur {
     /** Blur strength: f/1.8 ≈ 2.8% of the width (strong, creamy), f/8 light. */
     fun radiusFor(fNumber: Float): Float = (0.028f * (1.8f / fNumber)).coerceIn(0.005f, 0.05f)
 }
+
+/**
+ * HDR: merges a normal, a dark and a bright exposure (exposure fusion).
+ * Each pixel takes most from the frame where it is well exposed; weights are smoothed
+ * so there are no seams. Frames are aligned first (hand-held).
+ */
+object HdrFusion {
+
+    fun fuse(frames: List<Bitmap>): Bitmap {
+        val base = frames[0]
+        val w = base.width
+        val h = base.height
+        val n = w * h
+        val aligned = frames.map { f -> if (f === base) f else align(base, f) }
+        val px = aligned.map { b -> IntArray(n).also { b.getPixels(it, 0, w, 0, 0, w, h) } }
+
+        // weight maps at low resolution (smooth), then used per pixel
+        val sw = max(8, w / 8)
+        val sh = max(8, h / 8)
+        val weights = aligned.map { b ->
+            val s = Bitmap.createScaledBitmap(b, sw, sh, true)
+            val sp = IntArray(sw * sh)
+            s.getPixels(sp, 0, sw, 0, 0, sw, sh)
+            val wt = FloatArray(sw * sh) {
+                val c = sp[it]
+                val l = (Color.red(c) * 0.299f + Color.green(c) * 0.587f + Color.blue(c) * 0.114f) / 255f
+                val e = (l - 0.5f) / 0.22f
+                (kotlin.math.exp(-0.5f * e * e) + 1e-3f)
+            }
+            LensBlur.boxBlur(wt, sw, sh, 3)
+            wt
+        }
+        val out = IntArray(n)
+        for (y in 0 until h) {
+            val sy = (y * sh / h).coerceIn(0, sh - 1)
+            for (x in 0 until w) {
+                val sx = (x * sw / w).coerceIn(0, sw - 1)
+                val si = sy * sw + sx
+                var r = 0f; var g = 0f; var b = 0f; var ws = 0f
+                val i = y * w + x
+                for (k in px.indices) {
+                    val c = px[k][i]
+                    // fine detail: prefer the frame where this pixel itself is well exposed
+                    val l = (Color.red(c) * 0.299f + Color.green(c) * 0.587f + Color.blue(c) * 0.114f) / 255f
+                    val e = (l - 0.5f) / 0.3f
+                    val wk = weights[k][si] * (0.35f + 0.65f * kotlin.math.exp(-0.5f * e * e))
+                    r += Color.red(c) * wk; g += Color.green(c) * wk; b += Color.blue(c) * wk; ws += wk
+                }
+                val inv = 1f / max(1e-6f, ws)
+                out[i] = Color.rgb((r * inv).toInt().coerceIn(0, 255), (g * inv).toInt().coerceIn(0, 255), (b * inv).toInt().coerceIn(0, 255))
+            }
+        }
+        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    /** Shifts [f] to line up with [ref] (exposure-normalised comparison at 1/8 scale). */
+    private fun align(ref: Bitmap, f: Bitmap): Bitmap {
+        if (f.width != ref.width || f.height != ref.height) return Bitmap.createScaledBitmap(f, ref.width, ref.height, true)
+        val sw = max(16, ref.width / 8)
+        val sh = max(16, ref.height / 8)
+        fun gray(b: Bitmap): FloatArray {
+            val s = Bitmap.createScaledBitmap(b, sw, sh, true)
+            val p = IntArray(sw * sh)
+            s.getPixels(p, 0, sw, 0, 0, sw, sh)
+            val g = FloatArray(sw * sh) { Color.red(p[it]) * 0.3f + Color.green(p[it]) * 0.59f + Color.blue(p[it]) * 0.11f }
+            val mean = max(1f, g.average().toFloat())
+            for (i in g.indices) g[i] /= mean
+            return g
+        }
+        val a = gray(ref)
+        val b = gray(f)
+        val range = 8
+        var best = Float.MAX_VALUE
+        var bx = 0
+        var by = 0
+        for (dy in -range..range) for (dx in -range..range) {
+            var sum = 0f
+            var cnt = 0
+            var y = range
+            while (y < sh - range) {
+                var x = range
+                while (x < sw - range) {
+                    sum += abs(a[y * sw + x] - b[(y + dy) * sw + (x + dx)]); cnt++; x += 2
+                }
+                y += 2
+            }
+            if (cnt > 0 && sum / cnt < best) { best = sum / cnt; bx = dx; by = dy }
+        }
+        if (bx == 0 && by == 0) return f
+        val out = Bitmap.createBitmap(f.width, f.height, Bitmap.Config.ARGB_8888)
+        Canvas(out).drawBitmap(f, -bx * 8f, -by * 8f, null)
+        return out
+    }
+}

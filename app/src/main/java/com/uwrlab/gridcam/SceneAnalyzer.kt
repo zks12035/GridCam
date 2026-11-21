@@ -24,7 +24,12 @@ object SceneAnalyzer {
     const val GH = 120
 
     /** Reads the Y (brightness) plane into a GW x GH upright grayscale array (values 0..1). */
-    fun gray(proxy: ImageProxy): FloatArray {
+    fun gray(proxy: ImageProxy): FloatArray = grayAt(proxy, GW, GH)
+
+    /** Upright grayscale copy of the camera frame at [gw] x [gh] (values 0..1). */
+    fun grayAt(proxy: ImageProxy, gw: Int, gh: Int): FloatArray {
+        val GW = gw
+        val GH = gh
         val plane = proxy.planes[0]
         val buf = plane.buffer
         val rs = plane.rowStride

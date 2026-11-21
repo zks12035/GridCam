@@ -44,8 +44,29 @@
             android:theme="@style/Theme.GridCam" />
         <activity
             android:name=".EditorActivity"
-            android:exported="false"
-            android:screenOrientation="portrait" />
+            android:exported="true"
+            android:label="Edit with Grid Cam"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.EDIT" />
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".VideoTrimActivity"
+            android:exported="true"
+            android:label="Trim with Grid Cam"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.EDIT" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+        </activity>
         <activity
             android:name=".EditActivity"
             android:exported="false"
