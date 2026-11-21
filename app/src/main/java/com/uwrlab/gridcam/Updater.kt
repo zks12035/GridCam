@@ -5,7 +5,11 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.app.DownloadManager
 import android.content.pm.PackageInstaller
+import android.net.Uri
+import android.os.Environment
+import android.provider.Settings
 import android.os.Build
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -48,7 +52,7 @@ object Updater {
                     AlertDialog.Builder(activity)
                         .setTitle("Grid Cam update available")
                         .setMessage("Build $remote is ready (you have build ${local - VERSION_OFFSET}). Install now?")
-                        .setPositiveButton("Install") { _, _ -> downloadAndInstall(activity, apkUrl) }
+                        .setPositiveButton("Install") { _, _ -> downloadAndInstall(activity, apkUrl, remote) }
                         .setNegativeButton("Later", null)
                         .show()
                 }
@@ -69,48 +73,78 @@ object Updater {
         return c.inputStream.bufferedReader().use { it.readText() }
     }
 
-    private fun downloadAndInstall(activity: Activity, url: String) {
-        Toast.makeText(activity, "Downloading update…", Toast.LENGTH_SHORT).show()
-        val appCtx = activity.applicationContext
+    @Volatile private var pendingInstall: Uri? = null
+
+    /** Download with Android's DownloadManager (shows a progress notification), then open the installer. */
+    private fun downloadAndInstall(activity: Activity, url: String, build: Int) {
+        val dm = activity.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val req = DownloadManager.Request(Uri.parse(url))
+            .setTitle("Grid Cam update")
+            .setDescription("Build $build")
+            .setMimeType("application/vnd.android.package-archive")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setDestinationInExternalFilesDir(activity, Environment.DIRECTORY_DOWNLOADS, "GridCam-build-$build.apk")
+        val id = try {
+            dm.enqueue(req)
+        } catch (e: Exception) {
+            Toast.makeText(activity, "Update download failed: ${e.message}", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(activity, "Downloading update… (see the notification)", Toast.LENGTH_LONG).show()
         io.execute {
-            try {
-                val file = File(appCtx.cacheDir, "update.apk")
-                val conn = URL(url).openConnection() as HttpURLConnection
-                conn.instanceFollowRedirects = true   // GitHub redirects to its file server (https -> https)
-                conn.connectTimeout = 15000
-                conn.readTimeout = 60000
-                conn.inputStream.use { input -> file.outputStream().use { input.copyTo(it) } }
-                install(appCtx, file)
-                activity.runOnUiThread {
-                    Toast.makeText(activity, "Installing update…", Toast.LENGTH_SHORT).show()
+            while (true) {
+                Thread.sleep(800)
+                var status = -1
+                var reason = 0
+                dm.query(DownloadManager.Query().setFilterById(id))?.use { c ->
+                    if (c.moveToFirst()) {
+                        status = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                        reason = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                    }
                 }
-            } catch (e: Exception) {
-                activity.runOnUiThread {
-                    Toast.makeText(activity, "Update failed: ${e.message}", Toast.LENGTH_LONG).show()
+                when (status) {
+                    DownloadManager.STATUS_SUCCESSFUL -> {
+                        val uri = dm.getUriForDownloadedFile(id)
+                        activity.runOnUiThread { launchInstaller(activity, uri) }
+                        return@execute
+                    }
+                    DownloadManager.STATUS_FAILED, -1 -> {
+                        activity.runOnUiThread {
+                            Toast.makeText(activity, "Update download failed (code $reason). Try again later.", Toast.LENGTH_LONG).show()
+                        }
+                        return@execute
+                    }
                 }
             }
         }
     }
 
-    private fun install(ctx: Context, apk: File) {
-        val installer = ctx.packageManager.packageInstaller
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-        params.setAppPackageName(ctx.packageName)
-        if (Build.VERSION.SDK_INT >= 31) {
-            params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
+    /** Opens Android's installer; asks for the "install unknown apps" permission first if needed. */
+    private fun launchInstaller(activity: Activity, uri: Uri?) {
+        if (uri == null) return
+        if (!activity.packageManager.canRequestPackageInstalls()) {
+            pendingInstall = uri
+            Toast.makeText(activity, "Allow Grid Cam to install updates, then press Back", Toast.LENGTH_LONG).show()
+            activity.startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + activity.packageName))
+            )
+            return
         }
-        val id = installer.createSession(params)
-        installer.openSession(id).use { session ->
-            session.openWrite("gridcam.apk", 0, apk.length()).use { out ->
-                apk.inputStream().use { it.copyTo(out) }
-                session.fsync(out)
-            }
-            val intent = Intent(ctx, UpdateReceiver::class.java)
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-                (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
-            val pi = PendingIntent.getBroadcast(ctx, id, intent, flags)
-            session.commit(pi.intentSender)
+        pendingInstall = null
+        val install = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            activity.startActivity(install)
+        } catch (e: Exception) {
+            Toast.makeText(activity, "Could not open the installer: ${e.message}", Toast.LENGTH_LONG).show()
         }
+    }
+
+    /** Call from onResume: continues the install after the user allowed it in Settings. */
+    fun onResume(activity: Activity) {
+        val uri = pendingInstall ?: return
+        if (activity.packageManager.canRequestPackageInstalls()) launchInstaller(activity, uri)
     }
 }
 

@@ -1411,6 +1411,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     override fun onResume() {
         super.onResume()
         loadLastThumb()
+        Updater.onResume(this)
         sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
