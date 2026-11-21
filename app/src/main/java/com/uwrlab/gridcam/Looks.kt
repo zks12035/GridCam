@@ -234,19 +234,24 @@ object LensBlur {
             r[i] = rr * rr * boost; g[i] = gg * gg * boost; b[i] = bb * bb * boost
         }
         val rad = max(1.5f, radiusFrac * sw)
-        val step = max(1f, rad / 5f)
+        val step = max(1f, rad / 7f)
+        // Smooth first so the sparse disc samples can't leave a dotted "mesh" pattern
+        val pre = kotlin.math.ceil(step).toInt().coerceAtLeast(1)
+        boxBlur(r, sw, sh, pre); boxBlur(g, sw, sh, pre); boxBlur(b, sw, sh, pre); boxBlur(wgt, sw, sh, pre)
         val offs = ArrayList<Int>()
         var oy = -rad
         while (oy <= rad) {
             var ox = -rad
             while (ox <= rad) {
-                if (ox * ox + oy * oy <= rad * rad) { offs.add(ox.toInt()); offs.add(oy.toInt()) }
+                if (ox * ox + oy * oy <= rad * rad) { offs.add(Math.round(ox)); offs.add(Math.round(oy)) }
                 ox += step
             }
             oy += step
         }
         val o = offs.toIntArray()
-        val out = IntArray(n)
+        val fr = FloatArray(n)
+        val fg = FloatArray(n)
+        val fb = FloatArray(n)
         for (y in 0 until sh) for (x in 0 until sw) {
             var sr = 0f; var sg = 0f; var sb = 0f; var sw8 = 0f
             var k = 0
@@ -258,15 +263,49 @@ object LensBlur {
                 k += 2
             }
             val inv = 1f / max(1e-6f, sw8)
-            out[y * sw + x] = Color.rgb(
-                (sqrt(sr * inv) * 255).toInt().coerceIn(0, 255),
-                (sqrt(sg * inv) * 255).toInt().coerceIn(0, 255),
-                (sqrt(sb * inv) * 255).toInt().coerceIn(0, 255)
+            val i = y * sw + x
+            fr[i] = sr * inv; fg[i] = sg * inv; fb[i] = sb * inv
+        }
+        // final light smoothing before enlarging back to full size
+        boxBlur(fr, sw, sh, 1); boxBlur(fg, sw, sh, 1); boxBlur(fb, sw, sh, 1)
+        val out = IntArray(n)
+        for (i in 0 until n) {
+            out[i] = Color.rgb(
+                (sqrt(fr[i]) * 255).toInt().coerceIn(0, 255),
+                (sqrt(fg[i]) * 255).toInt().coerceIn(0, 255),
+                (sqrt(fb[i]) * 255).toInt().coerceIn(0, 255)
             )
         }
         val blurredSmall = Bitmap.createBitmap(out, sw, sh, Bitmap.Config.ARGB_8888)
-        return Bitmap.createScaledBitmap(blurredSmall, src.width, src.height, true)
+        // enlarge in two steps for a smoother result
+        val mid = Bitmap.createScaledBitmap(blurredSmall, max(1, src.width / 2), max(1, src.height / 2), true)
+        return Bitmap.createScaledBitmap(mid, src.width, src.height, true)
     }
 
-    fun radiusFor(fNumber: Float): Float = (0.034f * (1.8f / fNumber)).coerceIn(0.004f, 0.06f)
+    /** Fast separable box blur (in place) with the given radius. */
+    fun boxBlur(a: FloatArray, w: Int, h: Int, rad: Int) {
+        if (rad < 1) return
+        val tmp = FloatArray(a.size)
+        val div = (2 * rad + 1).toFloat()
+        for (y in 0 until h) {
+            val row = y * w
+            var sum = 0f
+            for (k in -rad..rad) sum += a[row + min(w - 1, max(0, k))]
+            for (x in 0 until w) {
+                tmp[row + x] = sum / div
+                sum += a[row + min(w - 1, x + rad + 1)] - a[row + max(0, x - rad)]
+            }
+        }
+        for (x in 0 until w) {
+            var sum = 0f
+            for (k in -rad..rad) sum += tmp[min(h - 1, max(0, k)) * w + x]
+            for (y in 0 until h) {
+                a[y * w + x] = sum / div
+                sum += tmp[min(h - 1, y + rad + 1) * w + x] - tmp[max(0, y - rad) * w + x]
+            }
+        }
+    }
+
+    /** Blur strength like a 50 mm lens on APS-C: f/1.8 ≈ 1.8% of the width, f/8 very light. */
+    fun radiusFor(fNumber: Float): Float = (0.018f * (1.8f / fNumber)).coerceIn(0.003f, 0.03f)
 }

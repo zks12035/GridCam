@@ -227,6 +227,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         proLabel = findViewById(R.id.proLabel)
         proSlider = findViewById(R.id.proSlider)
         buildProChips()
+        Updater.checkOnStart(this)
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
@@ -990,6 +991,8 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     private var lockedId: Int? = null           // ML Kit tracking id, if the detector knows the object
     private var lockedBox: RectF? = null        // current subject box (camera-frame 0..1)
     private var lostFrames = 0
+    private var autoBox: RectF? = null          // most prominent detected object (used if nothing is tapped)
+    @Volatile private var gravityZ = 0f         // > 7 means the camera points at the ground
     private val tracker = TemplateTracker()
     private var lastFocusTime = 0L
     private var lastFocusX = 0f
@@ -1049,6 +1052,8 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 tracker.start(gray, tap.x, tap.y)
             }
         }
+
+        autoBox = dets.maxByOrNull { it.box.width() * it.box.height() }?.box?.let { RectF(it) }
 
         // 2. Follow the selected subject
         var box: RectF? = null
@@ -1140,7 +1145,8 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
             .format(System.currentTimeMillis())
         val gridName = overlay.activeGridLabel()
         val shotMode = captureMode
-        val shotSubject = lockedBox?.let { RectF(it) }
+        val shotSubject = (lockedBox ?: autoBox)?.let { RectF(it) }
+        val shotTopDown = gravityZ > 7f
         val shotStyle = style
         val shotF = portraitF
         val info = MediaHelper.makeInfo(shotTilt, gridName, shotMode.label + " · " + shotStyle.label)
@@ -1188,7 +1194,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                             }
                             try {
                                 val src = MediaHelper.decode(contentResolver, uri, 2400)
-                                val portrait = PortraitMaker.make(this@MainActivity, src, shotSubject, shotF)
+                                val portrait = PortraitMaker.make(this@MainActivity, src, shotSubject, shotF, shotTopDown)
                                 MediaHelper.saveJpeg(
                                     contentResolver, portrait, MediaHelper.newName("GridCam_portrait_"),
                                     MediaHelper.makeInfo(shotTilt, gridName, "Portrait f/" + shotF + " · " + shotStyle.label)
@@ -1235,6 +1241,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     override fun onSensorChanged(event: SensorEvent) {
         val gx = event.values[0]
         val gy = event.values[1]
+        gravityZ = event.values[2]
         val planar = Math.hypot(gx.toDouble(), gy.toDouble()).toFloat()
         if (planar < 2.5f) {
             // phone almost flat: top-down level with two crosshairs

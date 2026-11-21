@@ -485,8 +485,12 @@ class GridOverlayView @JvmOverloads constructor(
                 canvas.drawLine(fx + sx * q, fy + sy * q, fx + sx * (q - l), fy + sy * q, focusBracket)
                 canvas.drawLine(fx + sx * q, fy + sy * q, fx + sx * q, fy + sy * (q - l), focusBracket)
             }
-            labelPaint.color = Color.WHITE
-            canvas.drawText("Focus", fx, fy + q + 16f * d, labelPaint)
+            val tgt = target
+            val nearTarget = tgt != null && hypot(tgt.x * w - fx, tgt.y * h - fy) < 90f * d
+            if (!nearTarget) { // avoid text on top of the red circle's label
+                labelPaint.color = Color.WHITE
+                canvas.drawText("Focus", fx, fy + q + 16f * d, labelPaint)
+            }
         }
 
         target?.let { t ->

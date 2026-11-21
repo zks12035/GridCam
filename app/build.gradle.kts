@@ -11,8 +11,10 @@ android {
         applicationId = "com.uwrlab.gridcam"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // GitHub build number -> version, so the app can tell when a newer build exists
+        val run = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toInt()
+        versionCode = run + 100
+        versionName = "1.0.$run"
     }
 
     // Fixed key so every GitHub build can be installed over the previous one
