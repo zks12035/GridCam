@@ -143,6 +143,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     private var awbIndex = 0
     private var portraitF = 1.8f
     private var naturalLook = true   // clean multi-frame "Sony-like" processing for Photo/Portrait
+    private var naturalSettingsOk = true   // false if this camera refused the low-processing settings
     private var pendingPortraitZoom = false
     @Volatile private var readout = ""
     private var lastReadout = 0L
@@ -487,7 +488,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                         val captureBuilder = ImageCapture.Builder()
                             .setResolutionSelector(ratio43)
                             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        if (naturalLook) naturalProcessing(captureBuilder)
+                        if (naturalLook && naturalSettingsOk) naturalProcessing(captureBuilder)
                         val capture = captureBuilder.build()
                         camera = provider.bindToLifecycle(
                             this, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture, analysis
@@ -498,6 +499,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 CaptureMode.SLOWMO -> bindSlowMotion(provider)
             }
             observeZoom()
+            startPreviewWatchdog()
             if (captureMode == CaptureMode.PORTRAIT) pendingPortraitZoom = true
             applyCameraSettings()
             applyStylePreview()
@@ -766,15 +768,61 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         }
     }
 
+    // ---------- Preview safety net ----------
+
+    private var watchdogToken = 0
+
+    /** If the preview hasn't started after 3 s, drop the low-processing camera settings and retry. */
+    private fun startPreviewWatchdog() {
+        val token = ++watchdogToken
+        previewView.postDelayed({
+            if (token != watchdogToken) return@postDelayed
+            val streaming = previewView.previewStreamState.value == PreviewView.StreamState.STREAMING
+            if (!streaming && naturalLook && naturalSettingsOk &&
+                (captureMode == CaptureMode.PHOTO || captureMode == CaptureMode.PORTRAIT)
+            ) {
+                // keep the multi-frame merging, just use the camera's standard processing settings
+                naturalSettingsOk = false
+                Toast.makeText(
+                    this,
+                    "Camera didn't accept the low-processing settings; using standard settings (frame merging stays on).",
+                    Toast.LENGTH_LONG
+                ).show()
+                bindForMode()
+            }
+        }, 3000)
+    }
+
     // ---------- Natural look (clean, Sony-like) ----------
 
-    /** Asks the camera for minimal processing: no edge sharpening (halos), minimal noise smoothing. */
+    /**
+     * Asks the camera for minimal processing (no edge sharpening halos, light noise smoothing),
+     * but only with settings this camera actually supports.
+     */
     @OptIn(ExperimentalCamera2Interop::class)
     @kotlin.OptIn(ExperimentalCamera2Interop::class)
     private fun naturalProcessing(builder: ImageCapture.Builder) {
-        Camera2Interop.Extender(builder)
-            .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
-            .setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL)
+        val provider = cameraProvider ?: return
+        try {
+            val chars = Camera2CameraInfo.from(provider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA))
+            val edgeModes = chars.getCameraCharacteristic(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)
+            val nrModes = chars.getCameraCharacteristic(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)
+            val ext = Camera2Interop.Extender(builder)
+            when {
+                edgeModes?.contains(CameraMetadata.EDGE_MODE_OFF) == true ->
+                    ext.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
+                edgeModes?.contains(CameraMetadata.EDGE_MODE_FAST) == true ->
+                    ext.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_FAST)
+            }
+            when {
+                nrModes?.contains(CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL) == true ->
+                    ext.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL)
+                nrModes?.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST) == true ->
+                    ext.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_FAST)
+            }
+        } catch (e: Exception) {
+            // keep the camera's default processing
+        }
     }
 
     /** 5 frames at full resolution, aligned and merged: clean detail without smearing or halos. */
