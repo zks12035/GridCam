@@ -1,6 +1,7 @@
 package com.uwrlab.gridcam
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
@@ -447,17 +448,7 @@ class GridOverlayView @JvmOverloads constructor(
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
 
-        when (activeMode) {
-            GridMode.THIRDS -> drawGridLines(canvas, 1f / 3f, 2f / 3f, w, h)
-            GridMode.PHI -> drawGridLines(canvas, 0.382f, 0.618f, w, h)
-            GridMode.SPIRAL -> drawSpiral(canvas, w, h)
-            GridMode.DIAGONAL -> drawDiagonals(canvas, w, h)
-            GridMode.TRIANGLES -> drawTriangles(canvas, w, h)
-            GridMode.CENTER, GridMode.AUTO -> drawCenter(canvas, w, h)
-            GridMode.SQUARE -> drawSquare(canvas, w, h)
-            GridMode.ARMATURE -> drawArmature(canvas, w, h)
-            GridMode.SAFE -> drawSafe(canvas, w, h)
-        }
+        drawGridCached(canvas, w, h)
         if (!horizonScreenY.isNaN()) {
             canvas.drawLine(0f, horizonScreenY * h, w, horizonScreenY * h, horizonPaint)
         }
@@ -525,7 +516,38 @@ class GridOverlayView @JvmOverloads constructor(
             canvas.drawCircle(focusX, focusY, 44f * d - 10f * d * min(1f, f * 3f), focusPaint)
         }
 
-        if (target != null || focusActive) postInvalidateOnAnimation()
+        // ~25 fps is plenty for the pulse animation and keeps the preview smooth
+        if (target != null || focusActive) postInvalidateDelayed(40)
+    }
+
+    // Grid lines (with shadows) are drawn once into a bitmap and reused every frame.
+    private var gridCache: Bitmap? = null
+    private var gridKey = ""
+
+    private fun drawGridCached(canvas: Canvas, w: Float, h: Float) {
+        val key = "$activeMode|$spiralFlipX|$spiralFlipY|$trianglesMirrored|${width}x$height"
+        var bmp = gridCache
+        if (key != gridKey || bmp == null) {
+            if (bmp == null || bmp.width != width || bmp.height != height) {
+                bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            }
+            bmp.eraseColor(Color.TRANSPARENT)
+            val c = Canvas(bmp)
+        when (activeMode) {
+                GridMode.THIRDS -> drawGridLines(c, 1f / 3f, 2f / 3f, w, h)
+                GridMode.PHI -> drawGridLines(c, 0.382f, 0.618f, w, h)
+                GridMode.SPIRAL -> drawSpiral(c, w, h)
+                GridMode.DIAGONAL -> drawDiagonals(c, w, h)
+                GridMode.TRIANGLES -> drawTriangles(c, w, h)
+                GridMode.CENTER, GridMode.AUTO -> drawCenter(c, w, h)
+                GridMode.SQUARE -> drawSquare(c, w, h)
+                GridMode.ARMATURE -> drawArmature(c, w, h)
+                GridMode.SAFE -> drawSafe(c, w, h)
+            }
+            gridCache = bmp
+            gridKey = key
+        }
+        canvas.drawBitmap(bmp, 0f, 0f, null)
     }
 
     private fun drawGridLines(c: Canvas, a: Float, b: Float, w: Float, h: Float) {

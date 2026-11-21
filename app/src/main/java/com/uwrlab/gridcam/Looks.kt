@@ -63,7 +63,11 @@ enum class CreativeStyle(val label: String) {
  * Night mode without Google's engine: several handheld shots are aligned and averaged
  * (less noise), moving things are rejected, then shadows are brightened.
  */
-class NightStacker {
+/**
+ * [brighten] = true for Night (lift shadows); false for the Natural look (just clean, true-to-life).
+ * [sharpen] = amount of gentle sharpening at the end.
+ */
+class NightStacker(private val brighten: Boolean = true, private val sharpen: Float = 0.5f) {
     private var w = 0
     private var h = 0
     private var ref: IntArray? = null
@@ -142,13 +146,15 @@ class NightStacker {
             lumSum += 0.299 * r + 0.587 * g + 0.114 * b
         }
         val mean = (lumSum / n).toFloat()
-        val gain = (0.36f / max(mean, 0.01f)).coerceIn(1f, 4f)
+        val gain = if (brighten) (0.36f / max(mean, 0.01f)).coerceIn(1f, 4f) else 1f
         val a = 0.6f
-        fun tone(v: Float): Float = (v * gain / (1f + v * gain * a) * (1f + a)).coerceIn(0f, 1f)
+        fun tone(v: Float): Float =
+            if (brighten) (v * gain / (1f + v * gain * a) * (1f + a)).coerceIn(0f, 1f) else v.coerceIn(0f, 1f)
+        val satBoost = if (brighten) 1.1f else 1.0f
         for (i in 0 until n) {
             var r = tone(avg[i * 3]); var g = tone(avg[i * 3 + 1]); var b = tone(avg[i * 3 + 2])
             val l = 0.299f * r + 0.587f * g + 0.114f * b
-            r = l + (r - l) * 1.1f; g = l + (g - l) * 1.1f; b = l + (b - l) * 1.1f
+            r = l + (r - l) * satBoost; g = l + (g - l) * satBoost; b = l + (b - l) * satBoost
             out[i] = Color.rgb((r * 255).toInt().coerceIn(0, 255), (g * 255).toInt().coerceIn(0, 255), (b * 255).toInt().coerceIn(0, 255))
         }
         val bmp = Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
@@ -197,7 +203,7 @@ class NightStacker {
         val b = IntArray(w * h)
         src.getPixels(s, 0, w, 0, 0, w, h)
         blur.getPixels(b, 0, w, 0, 0, w, h)
-        val k = 0.5f
+        val k = sharpen
         for (i in s.indices) {
             val r = Color.red(s[i]) + k * (Color.red(s[i]) - Color.red(b[i]))
             val g = Color.green(s[i]) + k * (Color.green(s[i]) - Color.green(b[i]))
@@ -234,9 +240,9 @@ object LensBlur {
             r[i] = rr * rr * boost; g[i] = gg * gg * boost; b[i] = bb * bb * boost
         }
         val rad = max(1.5f, radiusFrac * sw)
-        val step = max(1f, rad / 7f)
+        val step = max(1f, rad / 6f)
         // Smooth first so the sparse disc samples can't leave a dotted "mesh" pattern
-        val pre = kotlin.math.ceil(step).toInt().coerceAtLeast(1)
+        val pre = kotlin.math.ceil(step * 1.1f).toInt().coerceAtLeast(1)
         boxBlur(r, sw, sh, pre); boxBlur(g, sw, sh, pre); boxBlur(b, sw, sh, pre); boxBlur(wgt, sw, sh, pre)
         val offs = ArrayList<Int>()
         var oy = -rad
@@ -252,20 +258,33 @@ object LensBlur {
         val fr = FloatArray(n)
         val fg = FloatArray(n)
         val fb = FloatArray(n)
-        for (y in 0 until sh) for (x in 0 until sw) {
-            var sr = 0f; var sg = 0f; var sb = 0f; var sw8 = 0f
-            var k = 0
-            while (k < o.size) {
-                val xx = min(sw - 1, max(0, x + o[k]))
-                val yy = min(sh - 1, max(0, y + o[k + 1]))
-                val j = yy * sw + xx
-                sr += r[j]; sg += g[j]; sb += b[j]; sw8 += wgt[j]
-                k += 2
-            }
-            val inv = 1f / max(1e-6f, sw8)
-            val i = y * sw + x
-            fr[i] = sr * inv; fg[i] = sg * inv; fb[i] = sb * inv
+        // spread the rows over all CPU cores
+        val threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        val jobs = (0 until threads).map { t ->
+            pool.submit(Runnable {
+                var y = t
+                while (y < sh) {
+                    for (x in 0 until sw) {
+                        var sr = 0f; var sg = 0f; var sb = 0f; var sw8 = 0f
+                        var k = 0
+                        while (k < o.size) {
+                            val xx = min(sw - 1, max(0, x + o[k]))
+                            val yy = min(sh - 1, max(0, y + o[k + 1]))
+                            val j = yy * sw + xx
+                            sr += r[j]; sg += g[j]; sb += b[j]; sw8 += wgt[j]
+                            k += 2
+                        }
+                        val inv = 1f / max(1e-6f, sw8)
+                        val i = y * sw + x
+                        fr[i] = sr * inv; fg[i] = sg * inv; fb[i] = sb * inv
+                    }
+                    y += threads
+                }
+            })
         }
+        jobs.forEach { it.get() }
+        pool.shutdown()
         // final light smoothing before enlarging back to full size
         boxBlur(fr, sw, sh, 1); boxBlur(fg, sw, sh, 1); boxBlur(fb, sw, sh, 1)
         val out = IntArray(n)
@@ -306,6 +325,16 @@ object LensBlur {
         }
     }
 
-    /** Blur strength like a 50 mm lens on APS-C: f/1.8 ≈ 1.8% of the width, f/8 very light. */
-    fun radiusFor(fNumber: Float): Float = (0.018f * (1.8f / fNumber)).coerceIn(0.003f, 0.03f)
+    /** Cheap soft blur (for the "a little out of focus" middle distance). */
+    fun soft(src: Bitmap, radiusFrac: Float): Bitmap {
+        val k = max(2f, radiusFrac * src.width / 1.5f)
+        val sw = max(1, (src.width / k).toInt())
+        val sh = max(1, (src.height / k).toInt())
+        val small = Bitmap.createScaledBitmap(src, sw, sh, true)
+        val mid = Bitmap.createScaledBitmap(small, max(1, src.width / 3), max(1, src.height / 3), true)
+        return Bitmap.createScaledBitmap(mid, src.width, src.height, true)
+    }
+
+    /** Blur strength: f/1.8 ≈ 2.8% of the width (strong, creamy), f/8 light. */
+    fun radiusFor(fNumber: Float): Float = (0.028f * (1.8f / fNumber)).coerceIn(0.005f, 0.05f)
 }

@@ -155,72 +155,25 @@
             android:textSize="15sp" />
     </FrameLayout>
 
-    <HorizontalScrollView
-        android:id="@+id/proScroll"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:scrollbars="none"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/previewContainer">
-
-        <LinearLayout
-            android:id="@+id/proBar"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp" />
-    </HorizontalScrollView>
-
-    <HorizontalScrollView
-        android:id="@+id/modeScroll"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:scrollbars="none"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/proScroll">
-
-        <LinearLayout
-            android:id="@+id/modeBar"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp" />
-    </HorizontalScrollView>
-
-    <LinearLayout
-        android:id="@+id/captureBar"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:orientation="horizontal"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/modeScroll" />
-
+    <!-- Bottom controls, anchored from the bottom like the Pixel camera -->
     <View
         android:id="@+id/shutter"
         android:layout_width="76dp"
         android:layout_height="76dp"
+        android:layout_marginBottom="22dp"
         android:background="@drawable/shutter"
         android:clickable="true"
         android:contentDescription="@string/take_photo"
         android:focusable="true"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/captureBar" />
+        app:layout_constraintStart_toStartOf="parent" />
 
     <ImageView
         android:id="@+id/thumb"
         android:layout_width="54dp"
         android:layout_height="54dp"
-        android:layout_marginStart="36dp"
+        android:layout_marginStart="32dp"
         android:background="@drawable/thumb_bg"
         android:clipToOutline="true"
         android:contentDescription="Last photo"
@@ -229,5 +182,50 @@
         app:layout_constraintBottom_toBottomOf="@id/shutter"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="@id/shutter" />
+
+    <!-- Three icons: Mode · Grid · Pro. Each opens a pop-up table with all its options. -->
+    <LinearLayout
+        android:id="@+id/iconRow"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:gravity="center"
+        android:orientation="horizontal"
+        app:layout_constraintBottom_toTopOf="@id/shutter"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <LinearLayout
+        android:id="@+id/sheet"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:layout_marginEnd="10dp"
+        android:layout_marginBottom="8dp"
+        android:background="@drawable/sheet_bg"
+        android:clickable="true"
+        android:elevation="8dp"
+        android:orientation="vertical"
+        android:padding="12dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@id/iconRow"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <TextView
+            android:id="@+id/sheetTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="8dp"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <GridLayout
+            android:id="@+id/sheetGrid"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:columnCount="3" />
+    </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

@@ -89,7 +89,6 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     private lateinit var reasonText: TextView
     private lateinit var guidanceText: TextView
     private lateinit var flash: View
-    private lateinit var modeBar: LinearLayout
     private lateinit var zoomBar: LinearLayout
     private lateinit var zoomText: TextView
     private lateinit var scaleDetector: ScaleGestureDetector
@@ -116,11 +115,16 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     private var recording: Recording? = null
     private var recordStart = 0L
     private var lastItem: MediaItem? = null
-    private lateinit var captureBar: LinearLayout
     private lateinit var thumb: ImageView
     private lateinit var recTimer: TextView
     private lateinit var shutter: View
-    private val captureChips = LinkedHashMap<CaptureMode, TextView>()
+    // bottom: three icons (Mode · Grid · Pro), each opens a pop-up table
+    private lateinit var iconRow: LinearLayout
+    private lateinit var sheet: View
+    private lateinit var sheetTitle: TextView
+    private lateinit var sheetGrid: android.widget.GridLayout
+    private var sheetKind: String? = null
+    private val icons = LinkedHashMap<String, TextView>()
 
     // night mode
     private var extensionsManager: ExtensionsManager? = null
@@ -128,18 +132,17 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     private var nightBusy = false
 
     // Sony-style "pro" controls
-    private lateinit var proBar: LinearLayout
     private lateinit var proPanel: View
     private lateinit var proLabel: TextView
     private lateinit var proSlider: SeekBar
     private var activePro: String? = null
-    private val proChips = LinkedHashMap<String, TextView>()
     private var style = CreativeStyle.STANDARD
     private var evIndex = 0
     private var manualIso: Int? = null
     private var manualShutterNs: Long? = null
     private var awbIndex = 0
     private var portraitF = 1.8f
+    private var naturalLook = true   // clean multi-frame "Sony-like" processing for Photo/Portrait
     private var pendingPortraitZoom = false
     @Volatile private var readout = ""
     private var lastReadout = 0L
@@ -193,7 +196,6 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         reasonText = findViewById(R.id.reasonText)
         guidanceText = findViewById(R.id.guidanceText)
         flash = findViewById(R.id.flash)
-        modeBar = findViewById(R.id.modeBar)
         zoomBar = findViewById(R.id.zoomBar)
         zoomText = findViewById(R.id.zoomText)
         // TextureView mode so the preview can be scaled for extra digital zoom
@@ -215,14 +217,16 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         buildModeChips()
         setupTapToFocus()
-        captureBar = findViewById(R.id.captureBar)
+        iconRow = findViewById(R.id.iconRow)
+        sheet = findViewById(R.id.sheet)
+        sheetTitle = findViewById(R.id.sheetTitle)
+        sheetGrid = findViewById(R.id.sheetGrid)
         thumb = findViewById(R.id.thumb)
         recTimer = findViewById(R.id.recTimer)
         shutter = findViewById(R.id.shutter)
         shutter.setOnClickListener { onShutter() }
         thumb.setOnClickListener { openLast() }
         buildCaptureChips()
-        proBar = findViewById(R.id.proBar)
         proPanel = findViewById(R.id.proPanel)
         proLabel = findViewById(R.id.proLabel)
         proSlider = findViewById(R.id.proSlider)
@@ -236,40 +240,9 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
 
     // ---------- UI ----------
 
-    private fun buildModeChips() {
-        for (mode in GridMode.values()) {
-            val chip = TextView(this).apply {
-                text = mode.label
-                textSize = 14f
-                val padH = (14 * density).toInt()
-                val padV = (8 * density).toInt()
-                setPadding(padH, padV, padH, padV)
-                setOnClickListener {
-                    this@MainActivity.overlay.userMode = mode
-                    refreshChips()
-                }
-            }
-            val lp = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-            lp.marginEnd = (8 * density).toInt()
-            modeBar.addView(chip, lp)
-            chips[mode] = chip
-        }
-        refreshChips()
-    }
+    private fun buildModeChips() {}
 
-    private fun refreshChips() {
-        for ((mode, chip) in chips) {
-            val selected = mode == overlay.userMode
-            chip.background = GradientDrawable().apply {
-                cornerRadius = 50f * density
-                setColor(if (selected) Color.WHITE else Color.argb(60, 255, 255, 255))
-            }
-            chip.setTextColor(if (selected) Color.BLACK else Color.WHITE)
-        }
-    }
+    private fun refreshChips() = refreshIcons()
 
     override fun onGuidance(mode: GridMode, reason: String, guidance: String, aligned: Boolean) {
         val prefix = if (overlay.userMode == GridMode.AUTO) "Suggested grid: " else "Grid: "
@@ -295,6 +268,10 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
             }
         })
         previewView.setOnTouchListener { v, event ->
+            if (sheet.visibility == View.VISIBLE) {
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) hideSheet()
+                return@setOnTouchListener true
+            }
             scaleDetector.onTouchEvent(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> pinching = false
@@ -388,6 +365,10 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
             }
             chip.setTextColor(if (on) Color.BLACK else Color.WHITE)
         }
+        updateZoomText()
+    }
+
+    private fun updateZoomText() {
         val sb = StringBuilder(zoomLabel(currentZoom))
         if (extraZoom > 1.01f) sb.append("  ·  digital crop")
         if (currentZoom >= 5f) sb.append("  ·  hold steady")
@@ -503,10 +484,11 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                         )
                         videoCapture = vc
                     } else {
-                        val capture = ImageCapture.Builder()
+                        val captureBuilder = ImageCapture.Builder()
                             .setResolutionSelector(ratio43)
                             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                            .build()
+                        if (naturalLook) naturalProcessing(captureBuilder)
+                        val capture = captureBuilder.build()
                         camera = provider.bindToLifecycle(
                             this, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture, analysis
                         )
@@ -557,32 +539,24 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     // ---------- Capture modes ----------
 
     private fun buildCaptureChips() {
-        for (m in CaptureMode.values()) {
-            val chip = TextView(this).apply {
-                text = m.label
-                textSize = 14f
-                val padH = (12 * density).toInt()
-                val padV = (6 * density).toInt()
-                setPadding(padH, padV, padH, padV)
-                setOnClickListener { switchMode(m) }
+        for ((key, glyph) in listOf("mode" to "◉", "grid" to "▦", "pro" to "☰")) {
+            val icon = TextView(this).apply {
+                gravity = Gravity.CENTER
+                textSize = 13f
+                setLineSpacing(0f, 1.1f)
+                setOnClickListener { showSheet(key) }
+                tag = glyph
             }
-            val lp = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+            val lp = LinearLayout.LayoutParams((96 * density).toInt(), (56 * density).toInt())
+            lp.marginStart = (6 * density).toInt()
             lp.marginEnd = (6 * density).toInt()
-            captureBar.addView(chip, lp)
-            captureChips[m] = chip
+            iconRow.addView(icon, lp)
+            icons[key] = icon
         }
         refreshCaptureChips()
     }
 
     private fun refreshCaptureChips() {
-        for ((m, chip) in captureChips) {
-            val on = m == captureMode
-            chip.setTextColor(if (on) Color.rgb(255, 214, 0) else Color.WHITE)
-            chip.paint.isUnderlineText = on
-            chip.invalidate()
-        }
         shutter.setBackgroundResource(
             when {
                 recording != null -> R.drawable.shutter_stop
@@ -590,6 +564,132 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 else -> R.drawable.shutter
             }
         )
+        refreshIcons()
+    }
+
+    /** Updates the three bottom icons with the current mode / grid / pro state. */
+    private fun refreshIcons() {
+        if (icons.isEmpty()) return
+        val proActive = evIndex != 0 || manualIso != null || manualShutterNs != null ||
+            awbIndex != 0 || style != CreativeStyle.STANDARD
+        for ((key, icon) in icons) {
+            val label = when (key) {
+                "mode" -> captureMode.label
+                "grid" -> if (overlay.userMode == GridMode.AUTO) "Auto grid" else overlay.userMode.label
+                else -> if (proActive) "Pro •" else "Pro"
+            }
+            icon.text = icon.tag.toString() + "\n" + label
+            val open = sheet.visibility == View.VISIBLE && sheetKind == key
+            icon.background = GradientDrawable().apply {
+                cornerRadius = 18f * density
+                setColor(if (open) Color.rgb(255, 214, 0) else Color.argb(55, 255, 255, 255))
+            }
+            icon.setTextColor(if (open) Color.BLACK else Color.WHITE)
+        }
+    }
+
+    private fun hideSheet() {
+        sheet.visibility = View.GONE
+        sheetKind = null
+        refreshIcons()
+    }
+
+    private fun proKeysVisible(): List<String> {
+        val video = captureMode == CaptureMode.VIDEO || captureMode == CaptureMode.SLOWMO
+        return listOf("Look", "EV", "ISO", "Shutter", "WB", "Style", "Aperture").filter { key ->
+            when {
+                key == "Look" -> captureMode == CaptureMode.PHOTO || captureMode == CaptureMode.PORTRAIT
+                key == "Aperture" -> captureMode == CaptureMode.PORTRAIT
+                captureMode == CaptureMode.SLOWMO -> false
+                video && key == "Style" -> false
+                else -> true
+            }
+        }
+    }
+
+    /** Pop-up table with every option of one category. */
+    private fun showSheet(kind: String) {
+        if (sheet.visibility == View.VISIBLE && sheetKind == kind) {
+            hideSheet()
+            return
+        }
+        sheetKind = kind
+        sheetGrid.removeAllViews()
+        class Item(val label: String, val selected: Boolean, val action: () -> Unit)
+        val items = ArrayList<Item>()
+        when (kind) {
+            "mode" -> {
+                sheetTitle.text = "Camera mode"
+                for (m in CaptureMode.values()) items.add(Item(m.label, m == captureMode) {
+                    hideSheet(); switchMode(m)
+                })
+            }
+            "grid" -> {
+                sheetTitle.text = "Composition grid"
+                for (g in GridMode.values()) items.add(Item(g.label, g == overlay.userMode) {
+                    overlay.userMode = g; hideSheet()
+                })
+            }
+            else -> {
+                sheetTitle.text = if (proKeysVisible().isEmpty()) "Pro controls are off in slow motion" else "Pro controls (Sony style)"
+                for (key in proKeysVisible()) items.add(Item(proValue(key), key == activePro || (key == "Look" && naturalLook)) {
+                    hideSheet()
+                    if (key == "Look") {
+                        naturalLook = !naturalLook
+                        Toast.makeText(
+                            this,
+                            if (naturalLook) "Natural look: clean multi-frame photos, no phone over-sharpening"
+                            else "Phone look: single shot with the phone's normal processing",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        bindForMode()
+                    } else {
+                        toggleProPanel(key)   // opens the slider (tap again to close it)
+                    }
+                })
+                if (proKeysVisible().isNotEmpty()) items.add(Item("Reset all", false) { resetPro(); hideSheet() })
+            }
+        }
+        for (item in items) {
+            val cell = TextView(this).apply {
+                text = item.label
+                gravity = Gravity.CENTER
+                textSize = 14f
+                minHeight = (48 * density).toInt()
+                val p = (6 * density).toInt()
+                setPadding(p, p, p, p)
+                background = GradientDrawable().apply {
+                    cornerRadius = 14f * density
+                    setColor(if (item.selected) Color.rgb(255, 214, 0) else Color.argb(45, 255, 255, 255))
+                }
+                setTextColor(if (item.selected) Color.BLACK else Color.WHITE)
+                setOnClickListener { item.action() }
+            }
+            val lp = android.widget.GridLayout.LayoutParams(
+                android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED),
+                android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+            )
+            lp.width = 0
+            val m = (4 * density).toInt()
+            lp.setMargins(m, m, m, m)
+            sheetGrid.addView(cell, lp)
+        }
+        sheet.visibility = View.VISIBLE
+        refreshIcons()
+    }
+
+    private fun resetPro() {
+        evIndex = 0
+        manualIso = null
+        manualShutterNs = null
+        awbIndex = 0
+        style = CreativeStyle.STANDARD
+        portraitF = 1.8f
+        activePro = null
+        proPanel.visibility = View.GONE
+        applyCameraSettings()
+        applyStylePreview()
+        refreshProChips()
     }
 
     private fun switchMode(m: CaptureMode) {
@@ -615,7 +715,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
 
     private fun onShutter() {
         when (captureMode) {
-            CaptureMode.PHOTO, CaptureMode.PORTRAIT -> takePhoto()
+            CaptureMode.PHOTO, CaptureMode.PORTRAIT -> if (naturalLook) takeCleanStack() else takePhoto()
             CaptureMode.NIGHT -> if (nightExtension) takePhoto() else takeNightStack()
             CaptureMode.VIDEO, CaptureMode.SLOWMO -> toggleRecording()
         }
@@ -666,6 +766,115 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         }
     }
 
+    // ---------- Natural look (clean, Sony-like) ----------
+
+    /** Asks the camera for minimal processing: no edge sharpening (halos), minimal noise smoothing. */
+    @OptIn(ExperimentalCamera2Interop::class)
+    @kotlin.OptIn(ExperimentalCamera2Interop::class)
+    private fun naturalProcessing(builder: ImageCapture.Builder) {
+        Camera2Interop.Extender(builder)
+            .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
+            .setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL)
+    }
+
+    /** 5 frames at full resolution, aligned and merged: clean detail without smearing or halos. */
+    private fun takeCleanStack() {
+        val capture = imageCapture ?: return
+        if (nightBusy) return
+        nightBusy = true
+        val total = 5
+        val stacker = NightStacker(brighten = false, sharpen = 0.25f)
+        val shot = CleanShot(
+            tilt = overlay.straightenAngle(),
+            grid = overlay.activeGridLabel(),
+            style = style,
+            mode = captureMode,
+            crop = extraZoom,
+            subject = (lockedBox ?: autoBox)?.let { RectF(it) },
+            topDown = gravityZ > 7f,
+            fNumber = portraitF
+        )
+        guidanceText.text = "Hold still… 0/$total"
+        fun next(i: Int) {
+            capture.takePicture(ioExecutor, object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    try {
+                        stacker.add(toBitmap(image, 4096))
+                    } catch (e: Throwable) {
+                        // skip a bad frame
+                    } finally {
+                        image.close()
+                    }
+                    runOnUiThread { guidanceText.text = "Hold still… ${i + 1}/$total" }
+                    if (i + 1 < total) next(i + 1) else finishClean(stacker, shot)
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    finishClean(stacker, shot)
+                }
+            })
+        }
+        flash.alpha = 0.6f
+        flash.animate().alpha(0f).setDuration(250).start()
+        next(0)
+    }
+
+    private class CleanShot(
+        val tilt: Float, val grid: String, val style: CreativeStyle, val mode: CaptureMode,
+        val crop: Float, val subject: RectF?, val topDown: Boolean, val fNumber: Float
+    )
+
+    private fun finishClean(stacker: NightStacker, shot: CleanShot) {
+        ioExecutor.execute {
+            var uri: Uri? = null
+            var error: String? = null
+            try {
+                var result = stacker.result()
+                if (result != null && shot.crop > 1.01f) {
+                    val cw = (result.width / shot.crop).toInt().coerceAtLeast(1)
+                    val ch = (result.height / shot.crop).toInt().coerceAtLeast(1)
+                    result = Bitmap.createBitmap(result, (result.width - cw) / 2, (result.height - ch) / 2, cw, ch)
+                }
+                if (result != null && shot.style != CreativeStyle.STANDARD) result = shot.style.apply(result)
+                if (result != null) {
+                    uri = MediaHelper.saveJpeg(
+                        contentResolver, result, MediaHelper.newName("GridCam_"),
+                        MediaHelper.makeInfo(
+                            shot.tilt, shot.grid,
+                            shot.mode.label + " · Natural (" + stacker.frames + " frames) · " + shot.style.label
+                        )
+                    )
+                    if (shot.mode == CaptureMode.PORTRAIT) {
+                        runOnUiThread {
+                            Toast.makeText(this, "Making portrait…", Toast.LENGTH_SHORT).show()
+                        }
+                        val s = 1800f / maxOf(result.width, result.height)
+                        val src = if (s < 1f) Bitmap.createScaledBitmap(
+                            result, (result.width * s).toInt(), (result.height * s).toInt(), true
+                        ) else result
+                        val portrait = PortraitMaker.make(this, src, shot.subject, shot.fNumber, shot.topDown)
+                        MediaHelper.saveJpeg(
+                            contentResolver, portrait, MediaHelper.newName("GridCam_portrait_"),
+                            MediaHelper.makeInfo(shot.tilt, shot.grid, "Portrait f/" + shot.fNumber + " · Natural · " + shot.style.label)
+                        )?.let { uri = it }
+                    }
+                }
+            } catch (e: Throwable) {
+                error = e.message ?: e.javaClass.simpleName
+            }
+            runOnUiThread {
+                nightBusy = false
+                val u = uri
+                if (u != null) {
+                    Toast.makeText(this, "Saved (${stacker.frames} frames merged). Tap the thumbnail to review.", Toast.LENGTH_SHORT).show()
+                    setLast(MediaItem(u, false, System.currentTimeMillis()))
+                } else {
+                    Toast.makeText(this, "Photo failed: $error", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
     // ---------- Night (multi-frame stacking) ----------
 
     private fun takeNightStack() {
@@ -703,14 +912,14 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     }
 
     /** JPEG ImageProxy -> upright Bitmap (max ~2400 px for memory). */
-    private fun toBitmap(image: ImageProxy): Bitmap {
+    private fun toBitmap(image: ImageProxy, maxSide: Int = 2000): Bitmap {
         val buf = image.planes[0].buffer
         val bytes = ByteArray(buf.remaining())
         buf.get(bytes)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1
-        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 2000) sample *= 2
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxSide) sample *= 2
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
         val rot = image.imageInfo.rotationDegrees
         if (rot == 0) return bmp
@@ -749,21 +958,6 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
     // ---------- Sony-style pro controls ----------
 
     private fun buildProChips() {
-        for (key in listOf("EV", "ISO", "Shutter", "WB", "Style", "Aperture")) {
-            val chip = TextView(this).apply {
-                textSize = 13f
-                val padH = (10 * density).toInt()
-                val padV = (5 * density).toInt()
-                setPadding(padH, padV, padH, padV)
-                setOnClickListener { toggleProPanel(key) }
-            }
-            val lp = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-            lp.marginEnd = (6 * density).toInt()
-            proBar.addView(chip, lp)
-            proChips[key] = chip
-        }
         proSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
                 if (fromUser) onProSlider(progress)
@@ -771,7 +965,6 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
             override fun onStartTrackingTouch(sb: SeekBar) {}
             override fun onStopTrackingTouch(sb: SeekBar) {}
         })
-        refreshProChips()
     }
 
     private fun proValue(key: String): String = when (key) {
@@ -780,27 +973,11 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         "Shutter" -> shutterSteps.firstOrNull { it.second == manualShutterNs }?.first ?: "Shutter Auto"
         "WB" -> "WB " + awbModes[awbIndex].first
         "Style" -> style.label
+        "Look" -> if (naturalLook) "Look: Natural" else "Look: Phone"
         else -> "f/" + portraitF
     }
 
-    private fun refreshProChips() {
-        val video = captureMode == CaptureMode.VIDEO || captureMode == CaptureMode.SLOWMO
-        for ((key, chip) in proChips) {
-            chip.text = proValue(key)
-            chip.visibility = when {
-                key == "Aperture" -> if (captureMode == CaptureMode.PORTRAIT) View.VISIBLE else View.GONE
-                captureMode == CaptureMode.SLOWMO -> View.GONE
-                video && (key == "Style") -> View.GONE
-                else -> View.VISIBLE
-            }
-            val on = key == activePro
-            chip.background = GradientDrawable().apply {
-                cornerRadius = 40f * density
-                setColor(if (on) Color.rgb(255, 214, 0) else Color.argb(50, 255, 255, 255))
-            }
-            chip.setTextColor(if (on) Color.BLACK else Color.WHITE)
-        }
-    }
+    private fun refreshProChips() = refreshIcons()
 
     private fun evStep(): Float = camera?.cameraInfo?.exposureState?.exposureCompensationStep?.toFloat() ?: 0f
 
@@ -933,7 +1110,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 val shutter = if (exp >= 500_000_000L) String.format(Locale.US, "%.1f\"", exp / 1e9)
                 else "1/" + Math.round(1e9 / exp.toDouble())
                 readout = String.format(Locale.US, "%s · ISO %d · f/%.2f · EV %+.1f", shutter, iso, ap, evIndex * evStep())
-                runOnUiThread { updateZoomUi() }
+                runOnUiThread { updateZoomText() }
             }
         })
     }
@@ -986,12 +1163,14 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
 
     // ---------- Subject selection + tracking ----------
 
-    private var pendingTap: PointF? = null      // where the user tapped (camera-frame 0..1)
-    private var selected = false
+    @Volatile private var pendingTap: PointF? = null      // where the user tapped (camera-frame 0..1)
+    @Volatile private var selected = false
     private var lockedId: Int? = null           // ML Kit tracking id, if the detector knows the object
-    private var lockedBox: RectF? = null        // current subject box (camera-frame 0..1)
+    @Volatile private var lockedBox: RectF? = null        // current subject box (camera-frame 0..1)
     private var lostFrames = 0
-    private var autoBox: RectF? = null          // most prominent detected object (used if nothing is tapped)
+    private var frameCount = 0
+    private var lastScene: SceneInfo? = null
+    @Volatile private var autoBox: RectF? = null          // most prominent detected object (used if nothing is tapped)
     @Volatile private var gravityZ = 0f         // > 7 means the camera points at the ground
     private val tracker = TemplateTracker()
     private var lastFocusTime = 0L
@@ -1015,7 +1194,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         val input = InputImage.fromMediaImage(media, rotation)
 
         detector.process(input)
-            .addOnSuccessListener { objects ->
+            .addOnSuccessListener(analysisExecutor) { objects ->
                 val dets = objects.map {
                     val bb = it.boundingBox
                     Det(
@@ -1028,7 +1207,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 }
                 handleFrame(gray, dets)
             }
-            .addOnCompleteListener { proxy.close() }
+            .addOnCompleteListener(analysisExecutor) { proxy.close() }
     }
 
     private fun handleFrame(gray: FloatArray, dets: List<Det>) {
@@ -1039,7 +1218,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 .minByOrNull { it.box.width() * it.box.height() }
                 ?: dets.minByOrNull { Math.hypot((it.box.centerX() - tap.x).toDouble(), (it.box.centerY() - tap.y).toDouble()) }
                     ?.takeIf { Math.hypot((it.box.centerX() - tap.x).toDouble(), (it.box.centerY() - tap.y).toDouble()) < 0.12 }
-            overlay.clearSubject()
+            runOnUiThread { overlay.clearSubject() }
             selected = true
             lostFrames = 0
             if (hit != null) {
@@ -1074,22 +1253,31 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
             if (box != null) {
                 lockedBox = RectF(box)
                 lostFrames = 0
-                maybeRefocus(box)
+                val fb = RectF(box)
+                runOnUiThread { maybeRefocus(fb) }
             } else if (++lostFrames > 30) {
                 selected = false
                 lockedBox = null
-                camera?.cameraControl?.cancelFocusAndMetering()
-                Toast.makeText(this, "Subject lost. Tap it again.", Toast.LENGTH_SHORT).show()
+                runOnUiThread {
+                    camera?.cameraControl?.cancelFocusAndMetering()
+                    Toast.makeText(this, "Subject lost. Tap it again.", Toast.LENGTH_SHORT).show()
+                }
             } else {
                 box = lockedBox   // keep the last position for a moment
             }
         }
 
         // 3. Read the surroundings and update the grid
-        val info = SceneAnalyzer.analyze(gray, box)
+        frameCount++
+        val info = if (lastScene == null || frameCount % 3 == 0) SceneAnalyzer.analyze(gray, box) else lastScene!!
+        lastScene = info
         val hy = if (info.horizonY.isNaN()) Float.NaN else 0.5f + (info.horizonY - 0.5f) * extraZoom
-        overlay.updateScene(info, if (hy in 0f..1f) hy else Float.NaN)
-        overlay.updateSubject(if (selected) box?.let { toScreen(it) } else null)
+        val horizon = if (hy in 0f..1f) hy else Float.NaN
+        val screenBox = if (selected) box?.let { toScreen(it) } else null
+        runOnUiThread {
+            overlay.updateScene(info, horizon)
+            overlay.updateSubject(screenBox)
+        }
     }
 
     /** Keeps focus on the subject while it moves. */
@@ -1193,7 +1381,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                                 Toast.makeText(this@MainActivity, "Making portrait…", Toast.LENGTH_SHORT).show()
                             }
                             try {
-                                val src = MediaHelper.decode(contentResolver, uri, 2400)
+                                val src = MediaHelper.decode(contentResolver, uri, 1800)
                                 val portrait = PortraitMaker.make(this@MainActivity, src, shotSubject, shotF, shotTopDown)
                                 MediaHelper.saveJpeg(
                                     contentResolver, portrait, MediaHelper.newName("GridCam_portrait_"),

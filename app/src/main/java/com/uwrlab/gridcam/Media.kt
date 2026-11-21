@@ -123,7 +123,7 @@ object PortraitMaker {
 
         val radius = LensBlur.radiusFor(fNumber) * (if (topDown) 0.6f else 1f)
         val full = try { LensBlur.apply(src, radius) } catch (e: OutOfMemoryError) { blur(src) }
-        val light = try { LensBlur.apply(src, radius * 0.4f) } catch (e: OutOfMemoryError) { full }
+        val light = try { LensBlur.soft(src, radius * 0.5f) } catch (e: OutOfMemoryError) { full }
 
         val sp = IntArray(w * h)
         val fp = IntArray(w * h)
@@ -142,25 +142,25 @@ object PortraitMaker {
                 val l = lp[i]
                 val f = fp[i]
                 // background colour: sharp -> light blur -> full blur as distance grows
-                val (br, bgc, bb) = if (d < 0.5f) {
+                val sr = Color.red(s0); val sg = Color.green(s0); val sb = Color.blue(s0)
+                val br: Float
+                val bgc: Float
+                val bb: Float
+                if (d < 0.5f) {
                     val t = d * 2f
-                    Triple(
-                        Color.red(s0) + (Color.red(l) - Color.red(s0)) * t,
-                        Color.green(s0) + (Color.green(l) - Color.green(s0)) * t,
-                        Color.blue(s0) + (Color.blue(l) - Color.blue(s0)) * t
-                    )
+                    br = sr + (Color.red(l) - sr) * t
+                    bgc = sg + (Color.green(l) - sg) * t
+                    bb = sb + (Color.blue(l) - sb) * t
                 } else {
                     val t = (d - 0.5f) * 2f
-                    Triple(
-                        Color.red(l) + (Color.red(f) - Color.red(l)) * t,
-                        Color.green(l) + (Color.green(f) - Color.green(l)) * t,
-                        Color.blue(l) + (Color.blue(f) - Color.blue(l)) * t
-                    )
+                    br = Color.red(l) + (Color.red(f) - Color.red(l)) * t
+                    bgc = Color.green(l) + (Color.green(f) - Color.green(l)) * t
+                    bb = Color.blue(l) + (Color.blue(f) - Color.blue(l)) * t
                 }
                 sp[i] = Color.rgb(
-                    (Color.red(s0) * keep + br * (1 - keep)).toInt().coerceIn(0, 255),
-                    (Color.green(s0) * keep + bgc * (1 - keep)).toInt().coerceIn(0, 255),
-                    (Color.blue(s0) * keep + bb * (1 - keep)).toInt().coerceIn(0, 255)
+                    (sr * keep + br * (1 - keep)).toInt().coerceIn(0, 255),
+                    (sg * keep + bgc * (1 - keep)).toInt().coerceIn(0, 255),
+                    (sb * keep + bb * (1 - keep)).toInt().coerceIn(0, 255)
                 )
             }
         }
@@ -212,11 +212,11 @@ object PortraitMaker {
         val d = FloatArray(sw * sh)
         for (y in 0 until sh) {
             val ny = y.toFloat() / sh
-            val prior = if (!topDown) ((top - ny) / 0.25f).coerceIn(0f, 1f) * 0.6f else 0f
+            val prior = if (!topDown) ((top - ny) / 0.2f).coerceIn(0f, 1f) * 0.85f else 0f
             for (x in 0 until sw) {
                 val i = y * sw + x
                 val ratio = e[i] / ref
-                val soft = ((0.55f - ratio) / 0.4f).coerceIn(0f, 1f)
+                val soft = ((0.7f - ratio) / 0.45f).coerceIn(0f, 1f)
                 var v = max(soft, prior)
                 if (topDown) v *= 0.45f
                 d[i] = v
@@ -301,20 +301,44 @@ object PortraitMaker {
         return 0.75f
     }
 
+    /** Runs the AI cut-out on a smaller copy (much faster) and scales the mask back up. */
     private fun segmentMask(src: Bitmap): FloatArray? {
         return try {
+            val w = src.width
+            val h = src.height
+            val scale = (1024f / max(w, h)).coerceAtMost(1f)
+            val mw = max(1, (w * scale).toInt())
+            val mh = max(1, (h * scale).toInt())
+            val small = if (scale < 1f) Bitmap.createScaledBitmap(src, mw, mh, true) else src
             val options = SubjectSegmenterOptions.Builder()
                 .enableForegroundConfidenceMask()
                 .build()
             val segmenter = SubjectSegmentation.getClient(options)
-            val result = Tasks.await(segmenter.process(InputImage.fromBitmap(src, 0)))
+            val result = Tasks.await(segmenter.process(InputImage.fromBitmap(small, 0)))
             segmenter.close()
             val buf = result.foregroundConfidenceMask ?: return null
             buf.rewind()
-            val n = src.width * src.height
-            if (buf.remaining() < n) return null
-            val out = FloatArray(n)
-            buf.get(out)
+            if (buf.remaining() < mw * mh) return null
+            val m = FloatArray(mw * mh)
+            buf.get(m)
+            if (scale >= 1f) return m
+            // bilinear upscale to full size
+            val out = FloatArray(w * h)
+            for (y in 0 until h) {
+                val fy = (y + 0.5f) * mh / h - 0.5f
+                val y0 = fy.toInt().coerceIn(0, mh - 1)
+                val y1 = (y0 + 1).coerceAtMost(mh - 1)
+                val ty = (fy - y0).coerceIn(0f, 1f)
+                for (x in 0 until w) {
+                    val fx = (x + 0.5f) * mw / w - 0.5f
+                    val x0 = fx.toInt().coerceIn(0, mw - 1)
+                    val x1 = (x0 + 1).coerceAtMost(mw - 1)
+                    val tx = (fx - x0).coerceIn(0f, 1f)
+                    val top = m[y0 * mw + x0] * (1 - tx) + m[y0 * mw + x1] * tx
+                    val bot = m[y1 * mw + x0] * (1 - tx) + m[y1 * mw + x1] * tx
+                    out[y * w + x] = top * (1 - ty) + bot * ty
+                }
+            }
             out
         } catch (e: Exception) {
             null
