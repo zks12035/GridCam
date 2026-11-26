@@ -245,6 +245,7 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 .build()
         )
         proUi = getSharedPreferences("gridcam", MODE_PRIVATE).getBoolean("proUi", false)
+        overlay.colourWheel = getSharedPreferences("gridcam", MODE_PRIVATE).getBoolean("colourWheel", false)
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         buildModeChips()
         setupTapToFocus()
@@ -703,6 +704,11 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
                 sheetTitle.text = "Composition grid"
                 for (g in GridMode.values()) items.add(Item(g.label, g == overlay.userMode) {
                     overlay.userMode = g; hideSheet()
+                })
+                items.add(Item("🎨 Colour wheel", overlay.colourWheel) {
+                    overlay.colourWheel = !overlay.colourWheel
+                    getSharedPreferences("gridcam", MODE_PRIVATE).edit().putBoolean("colourWheel", overlay.colourWheel).apply()
+                    hideSheet()
                 })
             }
             else -> {
@@ -1525,6 +1531,10 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
             runOnUiThread { overlay.peaking = pk; overlay.peakingZoom = z }
         }
         val hist = if (proUi && analysisCount % 3 == 0) histogramOf(gray) else null
+        if (overlay.colourWheel && analysisCount % 6 == 0) {
+            val hh = SceneAnalyzer.hues(proxy)
+            runOnUiThread { overlay.updateHues(hh) }
+        }
         val input = InputImage.fromMediaImage(media, rotation)
         val runFaces = analysisCount % 3 == 0
         detector.process(input).addOnCompleteListener(analysisExecutor) { ot ->
@@ -1635,6 +1645,13 @@ class MainActivity : AppCompatActivity(), GridOverlayView.Listener, SensorEventL
         frameCount++
         val info = if (lastScene == null || frameCount % 3 == 0) SceneAnalyzer.analyze(gray, box) else lastScene!!
         lastScene = info
+        if (frameCount % 3 == 0) {
+            val k = extraZoom
+            val found = SceneAnalyzer.findLines(gray).map { l ->
+                floatArrayOf(0.5f + (l[0] - 0.5f) * k, 0.5f + (l[1] - 0.5f) * k, 0.5f + (l[2] - 0.5f) * k, 0.5f + (l[3] - 0.5f) * k)
+            }
+            runOnUiThread { overlay.updateLines(found) }
+        }
         val hy = if (info.horizonY.isNaN()) Float.NaN else 0.5f + (info.horizonY - 0.5f) * extraZoom
         val horizon = if (hy in 0f..1f) hy else Float.NaN
         var screenBox = if (selected) box?.let { toScreen(it) } else null

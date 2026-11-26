@@ -26,8 +26,17 @@ enum class GridMode(val label: String) {
     CENTER("Center"),
     SQUARE("4×4 square"),
     ARMATURE("Harmonic armature"),
-    SAFE("Video safe zones")
+    SAFE("Video safe zones"),
+    LINES("Scene lines"),
+    FRAME("Frame in frame"),
+    VANISHING("Vanishing point"),
+    SYMMETRY("Symmetry"),
+    NEGATIVE("Negative space"),
+    LAYERS("Layering")
 }
+
+/** A real line found in the scene. kind: 0 horizon (flat), 1 vertical, 2 leading (diagonal). */
+class SceneLine(var x1: Float, var y1: Float, var x2: Float, var y2: Float, val kind: Int, var ttl: Int = 3)
 
 /**
  * Draws the composition grid on top of the camera preview, decides which grid
@@ -272,6 +281,390 @@ class GridOverlayView @JvmOverloads constructor(
         horizonScreenY = horizonY
     }
 
+    // ---------- Scene lines (horizon, leading lines, triangle) ----------
+
+    private val lines = ArrayList<SceneLine>()
+
+    // ---------- Colour harmony (colour wheel badge) ----------
+
+    var colourWheel = false
+        set(v) { field = v; invalidate() }
+    private var hueHist = FloatArray(36)
+    private var harmonyHues: List<Float> = emptyList()
+    private var harmonyName = ""
+    private var harmonyGood = false
+
+    /** New hue histogram from the camera; finds the main colours and how they relate on the wheel. */
+    fun updateHues(h: FloatArray) {
+        for (i in 0 until 36) hueHist[i] = hueHist[i] * 0.5f + h[i] * 0.5f
+        // smooth around the circle
+        val sm = FloatArray(36) { (hueHist[(it + 35) % 36] + 2 * hueHist[it] + hueHist[(it + 1) % 36]) / 4f }
+        val total = sm.sum()
+        if (total < 1.5f) {
+            harmonyHues = emptyList(); harmonyName = "Few colours (muted / B&W look)"; harmonyGood = true
+            invalidate(); return
+        }
+        // peaks: local maxima holding at least 10% of the colour, at least 40° apart
+        val peaks = (0 until 36).filter { sm[it] >= sm[(it + 35) % 36] && sm[it] >= sm[(it + 1) % 36] && sm[it] > total * 0.035f }
+            .sortedByDescending { sm[it] }
+        val chosen = ArrayList<Int>()
+        for (p in peaks) {
+            if (chosen.size >= 3) break
+            val share = (-2..2).sumOf { sm[(p + it + 36) % 36].toDouble() }.toFloat() / total
+            if (share < 0.1f) continue
+            if (chosen.all { hueDist(it * 10f, p * 10f) >= 40f }) chosen.add(p)
+        }
+        harmonyHues = chosen.map { it * 10f + 5f }
+        val hs = harmonyHues
+        when {
+            hs.size <= 1 -> {
+                harmonyName = if (hs.isEmpty()) "Few colours" else "One colour: ${hueName(hs[0])} (calm)"
+                harmonyGood = true
+            }
+            hs.size == 2 && hueDist(hs[0], hs[1]) >= 150f -> {
+                harmonyName = "Complementary: ${hueName(hs[0])} & ${hueName(hs[1])} ✓"; harmonyGood = true
+            }
+            hs.size == 3 && listOf(hueDist(hs[0], hs[1]), hueDist(hs[1], hs[2]), hueDist(hs[0], hs[2])).all { it in 85f..155f } -> {
+                harmonyName = "Triadic colours ✓"; harmonyGood = true
+            }
+            spread(hs) <= 75f -> {
+                harmonyName = "Analogous: ${hs.joinToString(" · ") { hueName(it) }} ✓"; harmonyGood = true
+            }
+            hs.size == 2 -> {
+                val opp = (hs[0] + 180f) % 360f
+                harmonyName = "Add ${hueName(opp)} for contrast with ${hueName(hs[0])}"; harmonyGood = false
+            }
+            else -> { harmonyName = "Mixed colours: simplify the background"; harmonyGood = false }
+        }
+        invalidate()
+    }
+
+    private fun hueDist(a: Float, b: Float): Float { val d = abs(a - b) % 360f; return if (d > 180f) 360f - d else d }
+
+    /** Largest angle between any two hues (small = analogous). */
+    private fun spread(hs: List<Float>): Float {
+        var m = 0f
+        for (i in hs.indices) for (j in i + 1 until hs.size) m = maxOf(m, hueDist(hs[i], hs[j]))
+        return m
+    }
+
+    private fun hueName(h: Float): String = when (((h % 360f) + 360f) % 360f) {
+        in 0f..15f -> "red"; in 15f..40f -> "orange"; in 40f..70f -> "yellow"; in 70f..100f -> "lime"
+        in 100f..160f -> "green"; in 160f..200f -> "teal"; in 200f..250f -> "blue"; in 250f..290f -> "purple"
+        in 290f..335f -> "magenta"; else -> "red"
+    }
+
+    private val wheelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val wheelDot = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /** Small colour wheel (like the reel): dots on the main colours, joined to the centre. */
+    private fun drawColourWheel(c: Canvas, w: Float, h: Float) {
+        val r = 30f * d
+        val cx = 14f * d + r
+        val cy = h - 70f * d - r
+        val ring = 9f * d
+        wheelPaint.strokeWidth = ring
+        val oval = RectF(cx - r, cy - r, cx + r, cy + r)
+        for (i in 0 until 12) {
+            wheelPaint.color = Color.HSVToColor(floatArrayOf(i * 30f, 0.9f, 0.95f))
+            // hue 0 at top, clockwise
+            c.drawArc(oval, -90f + i * 30f - 15f, 30.5f, false, wheelPaint)
+        }
+        val hs = harmonyHues
+        linkPaint.pathEffect = null
+        for (hue in hs) {
+            val a = Math.toRadians((hue - 90f).toDouble())
+            val x = cx + (r * kotlin.math.cos(a)).toFloat()
+            val y = cy + (r * kotlin.math.sin(a)).toFloat()
+            focusBracket.strokeWidth = 2f * d
+            c.drawLine(cx, cy, x, y, focusBracket)
+            wheelDot.color = Color.HSVToColor(floatArrayOf(hue, 0.9f, 0.95f))
+            c.drawCircle(x, y, 7f * d, wheelDot)
+            c.drawCircle(x, y, 7f * d, focusBracket)
+        }
+        focusBracket.strokeWidth = 2.5f * d
+        linkPaint.pathEffect = DashPathEffect(floatArrayOf(8f * d, 6f * d), 0f)
+        levelText.color = if (harmonyGood) green else Color.rgb(255, 214, 0)
+        levelText.textAlign = Paint.Align.LEFT
+        c.drawText(harmonyName, cx + r + ring + 8f * d, cy + 5f * d, levelText)
+        levelText.textAlign = Paint.Align.CENTER
+    }
+    private var apex: PointF? = null
+
+    private fun kindOf(l: FloatArray): Int {
+        val dx = (l[2] - l[0]) * viewW()
+        val dy = (l[3] - l[1]) * viewH()
+        val deg = Math.toDegrees(kotlin.math.atan2(abs(dy), abs(dx)).toDouble())
+        return when { deg < 12 -> 0; deg > 78 -> 1; else -> 2 }
+    }
+
+    /** New lines from the camera (screen 0..1). Smoothed so they don't jump. */
+    fun updateLines(found: List<FloatArray>) {
+        for (l in lines) l.ttl--
+        for (f in found) {
+            // keep endpoints ordered left -> right so matching works
+            val a = if (f[0] <= f[2]) f else floatArrayOf(f[2], f[3], f[0], f[1])
+            val k = kindOf(a)
+            val mx = (a[0] + a[2]) / 2f; val my = (a[1] + a[3]) / 2f
+            val old = lines.firstOrNull {
+                it.kind == k && hypot((it.x1 + it.x2) / 2f - mx, (it.y1 + it.y2) / 2f - my) < 0.1f &&
+                    abs((it.y2 - it.y1) / (it.x2 - it.x1 + 1e-3f) - (a[3] - a[1]) / (a[2] - a[0] + 1e-3f)) < 0.3f
+            }
+            if (old != null) {
+                old.x1 += (a[0] - old.x1) * 0.5f; old.y1 += (a[1] - old.y1) * 0.5f
+                old.x2 += (a[2] - old.x2) * 0.5f; old.y2 += (a[3] - old.y2) * 0.5f
+                old.ttl = 3
+            } else lines.add(SceneLine(a[0], a[1], a[2], a[3], k))
+        }
+        lines.removeAll { it.ttl <= 0 }
+        while (lines.size > 6) lines.removeAt(0)
+        apex = findApex()
+        vanish = findVanishing()
+        recompute()
+        invalidate()
+    }
+
+    /** Two diagonals leaning towards each other (mountain, roof, tent): their top meeting point. */
+    private fun findApex(): PointF? {
+        val diag = lines.filter { it.kind == 2 }
+        for (i in diag.indices) for (j in i + 1 until diag.size) {
+            val a = diag[i]; val b = diag[j]
+            val sa = (a.y2 - a.y1) / (a.x2 - a.x1 + 1e-4f)
+            val sb = (b.y2 - b.y1) / (b.x2 - b.x1 + 1e-4f)
+            if (sa * sb >= 0f) continue
+            // intersection
+            val x = (b.y1 - a.y1 + sa * a.x1 - sb * b.x1) / (sa - sb)
+            val y = a.y1 + sa * (x - a.x1)
+            if (x !in 0.05f..0.95f || y !in 0.03f..0.85f) continue
+            // it must be the top of both lines (a peak, not a valley)
+            if (y > min(a.y1, a.y2) + 0.08f || y > min(b.y1, b.y2) + 0.08f) continue
+            val near = { l: SceneLine -> min(hypot(l.x1 - x, l.y1 - y), hypot(l.x2 - x, l.y2 - y)) }
+            if (near(a) < 0.2f && near(b) < 0.2f) return PointF(x, y)
+        }
+        return null
+    }
+
+    private var vanish: PointF? = null
+
+    /**
+     * Vanishing point: where 3+ lines (or 2 lines that don't touch) point to the same spot –
+     * corridors, rails, roads, bridges, tunnels.
+     */
+    private fun findVanishing(): PointF? {
+        val cand = lines.filter { it.kind != 0 }
+        if (cand.size < 2) return null
+        var best: PointF? = null
+        var bestN = 0
+        for (i in cand.indices) for (j in i + 1 until cand.size) {
+            val a = cand[i]; val b = cand[j]
+            val ax = a.x2 - a.x1; val ay = a.y2 - a.y1
+            val bx = b.x2 - b.x1; val by = b.y2 - b.y1
+            val den = ax * by - ay * bx
+            if (abs(den) < 1e-4f) continue
+            val t = ((b.x1 - a.x1) * by - (b.y1 - a.y1) * bx) / den
+            val p = PointF(a.x1 + ax * t, a.y1 + ay * t)
+            if (p.x !in 0.1f..0.9f || p.y !in 0.1f..0.9f) continue
+            // how many lines run through this point?
+            var n = 0
+            var gapOk = 0
+            for (l in cand) {
+                val dx = l.x2 - l.x1; val dy = l.y2 - l.y1
+                val len = hypot(dx, dy)
+                if (len < 1e-4f) continue
+                val dist = abs((p.x - l.x1) * dy - (p.y - l.y1) * dx) / len
+                if (dist < 0.035f) {
+                    n++
+                    val gap = min(hypot(l.x1 - p.x, l.y1 - p.y), hypot(l.x2 - p.x, l.y2 - p.y))
+                    if (gap > 0.06f) gapOk++
+                }
+            }
+            if ((n >= 3 || (n == 2 && gapOk == 2)) && n > bestN) { bestN = n; best = p }
+        }
+        val old = vanish
+        return if (best != null && old != null) PointF(old.x + (best.x - old.x) * 0.5f, old.y + (best.y - old.y) * 0.5f) else best
+    }
+
+    private fun drawVanishing(c: Canvas, w: Float, h: Float) {
+        val vp = vanish ?: PointF(0.5f, 0.5f)
+        val px = vp.x * w; val py = vp.y * h
+        // corners to the vanishing point + nested frames shrinking toward it (like a tunnel)
+        c.drawLine(0f, 0f, px, py, gridPaint); c.drawLine(w, 0f, px, py, gridPaint)
+        c.drawLine(0f, h, px, py, gridPaint); c.drawLine(w, h, px, py, gridPaint)
+        for (k in listOf(0.72f, 0.45f, 0.22f)) {
+            c.drawRect(px + (0f - px) * k, py + (0f - py) * k, px + (w - px) * k, py + (h - py) * k, guidePaint)
+        }
+        for (l in lines) if (l.kind != 0) drawExtended(c, l.x1, l.y1, l.x2, l.y2, w, h)
+        c.drawCircle(px, py, 6f * d, dotPaint)
+        levelText.color = Color.WHITE
+        c.drawText(if (vanish != null) "Vanishing point found" else "Point the camera down a road, corridor or rails",
+            w / 2f, h * 0.08f, levelText)
+    }
+
+    private fun drawSymmetry(c: Canvas, w: Float, h: Float) {
+        c.drawLine(w / 2f, 0f, w / 2f, h, linePaint)
+        val m = 10f * d
+        for (f in listOf(1f / 3f, 2f / 3f)) c.drawLine(w / 2f - m, f * h, w / 2f + m, f * h, gridPaint)
+        val sym = scene?.symmetry ?: 0f
+        levelText.color = if (sym > 0.7f) green else Color.WHITE
+        c.drawText("Mirror match ${(sym * 100).toInt()}%  (keep both sides equal)", w / 2f, h * 0.08f, levelText)
+    }
+
+    private fun drawNegative(c: Canvas, w: Float, h: Float) {
+        // measuring cross through the empty area, like a ruler showing the space
+        val open = scene?.openSide ?: 0f
+        val cx = if (open < 0f) w * 0.38f else w * 0.62f   // the empty side
+        val cap = 12f * d
+        val top = h * 0.15f; val bot = h * 0.75f
+        val left = cx - w * 0.25f; val right = cx + w * 0.25f
+        val cy = h * 0.47f
+        c.drawLine(cx, top, cx, bot, guidePaint)
+        c.drawLine(cx - cap, top, cx + cap, top, guidePaint); c.drawLine(cx - cap, bot, cx + cap, bot, guidePaint)
+        c.drawLine(left, cy, right, cy, guidePaint)
+        c.drawLine(left, cy - cap, left, cy + cap, guidePaint); c.drawLine(right, cy - cap, right, cy + cap, guidePaint)
+        val e = scene?.empty ?: 0f
+        levelText.color = if (e > 0.6f) green else Color.WHITE
+        c.drawText("Empty space ${(e * 100).toInt()}%  · keep the subject small, near an edge", w / 2f, h * 0.08f, levelText)
+    }
+
+    private val LAYER_MIN = 0.06f
+
+    /**
+     * Layering: foreground (bottom), middle ground (subject) and background (top).
+     * Each band shows ✓ when it has something in it, so the photo gets real depth.
+     */
+    private fun drawLayers(c: Canvas, w: Float, h: Float) {
+        val ly = scene?.layers ?: FloatArray(3)
+        val names = arrayOf("Background", "Middle (subject)", "Foreground")
+        val tints = intArrayOf(Color.argb(28, 80, 160, 255), Color.argb(22, 255, 214, 0), Color.argb(28, 0, 230, 118))
+        val fill = Paint()
+        for (b in 0 until 3) {
+            val top = h * b / 3f; val bot = h * (b + 1) / 3f
+            fill.color = tints[b]
+            c.drawRect(0f, top, w, bot, fill)
+            if (b > 0) c.drawLine(0f, top, w, top, guidePaint)
+            val ok = ly[b] > LAYER_MIN
+            levelText.textAlign = Paint.Align.LEFT
+            levelText.color = if (ok) green else Color.rgb(255, 214, 0)
+            c.drawText((if (ok) "✓ " else "○ ") + names[b], 12f * d, top + 22f * d, levelText)
+        }
+        levelText.textAlign = Paint.Align.CENTER
+        val missing = (0 until 3).filter { ly[it] <= LAYER_MIN }
+        levelText.color = if (missing.isEmpty()) green else Color.WHITE
+        val tip = when {
+            missing.isEmpty() -> "3 layers ✓ – great depth"
+            2 in missing -> "Add something close at the bottom: flowers, rocks, a branch"
+            0 in missing -> "Show more of the background: tilt up or step back"
+            else -> "Put your subject in the middle layer"
+        }
+        c.drawText(tip, w / 2f, h - 14f * d, levelText)
+    }
+
+    private fun negativePoints(): List<PointF> {
+        val open = scene?.openSide ?: 0f
+        // subject goes on the opposite side of the empty space, near the edge
+        return if (open > 0f) listOf(PointF(0.2f, 1f / 3f), PointF(0.2f, 2f / 3f))
+        else if (open < 0f) listOf(PointF(0.8f, 1f / 3f), PointF(0.8f, 2f / 3f))
+        else listOf(PointF(0.2f, 1f / 3f), PointF(0.8f, 1f / 3f), PointF(0.2f, 2f / 3f), PointF(0.8f, 2f / 3f))
+    }
+
+    private fun longestLeading(): SceneLine? =
+        lines.filter { it.kind == 2 }.maxByOrNull { hypot((it.x2 - it.x1) * viewW(), (it.y2 - it.y1) * viewH()) }
+            ?.takeIf { hypot(it.x2 - it.x1, it.y2 - it.y1) > 0.4f }
+
+    /** Where the subject should go with scene lines: on a line near a thirds point, or under the apex. */
+    private fun linePoints(): List<PointF> {
+        val pts = ArrayList<PointF>()
+        apex?.let { pts.add(PointF(it.x, it.y)) }
+        val thirds = grid4(1f / 3f, 2f / 3f)
+        for (l in lines) {
+            if (l.kind == 0) {
+                // horizon: subject stands on it at a vertical third
+                pts.add(PointF(1f / 3f, l.y1 + (l.y2 - l.y1) * ((1f / 3f - l.x1) / (l.x2 - l.x1 + 1e-4f))))
+                pts.add(PointF(2f / 3f, l.y1 + (l.y2 - l.y1) * ((2f / 3f - l.x1) / (l.x2 - l.x1 + 1e-4f))))
+                continue
+            }
+            val dx = l.x2 - l.x1; val dy = l.y2 - l.y1
+            val len2 = dx * dx + dy * dy
+            if (len2 < 1e-5f) continue
+            for (t in thirds) {
+                // nearest point on the (extended) line to the thirds point
+                val u = ((t.x - l.x1) * dx + (t.y - l.y1) * dy) / len2
+                val p = PointF(l.x1 + u * dx, l.y1 + u * dy)
+                if (p.x in 0.05f..0.95f && p.y in 0.05f..0.95f && hypot(p.x - t.x, p.y - t.y) < 0.2f) pts.add(p)
+            }
+        }
+        return pts.filter { it.y in 0.03f..0.97f }.ifEmpty { thirds }
+    }
+
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f * d
+        strokeCap = Paint.Cap.ROUND
+        setShadowLayer(3f * d, 0f, 0f, Color.argb(180, 0, 0, 0))
+    }
+
+    /** Extends segment (x1,y1)-(x2,y2) to the frame edges and draws it. */
+    private fun drawExtended(c: Canvas, x1: Float, y1: Float, x2: Float, y2: Float, w: Float, h: Float) {
+        val dx = x2 - x1; val dy = y2 - y1
+        var t0 = -1e9f; var t1 = 1e9f
+        if (abs(dx) > 1e-6f) { val a = -x1 / dx; val b = (1f - x1) / dx; t0 = maxOf(t0, minOf(a, b)); t1 = minOf(t1, maxOf(a, b)) }
+        if (abs(dy) > 1e-6f) { val a = -y1 / dy; val b = (1f - y1) / dy; t0 = maxOf(t0, minOf(a, b)); t1 = minOf(t1, maxOf(a, b)) }
+        if (t0 > t1) return
+        c.drawLine((x1 + dx * t0) * w, (y1 + dy * t0) * h, (x1 + dx * t1) * w, (y1 + dy * t1) * h, linePaint)
+    }
+
+    private fun drawSceneLines(c: Canvas, w: Float, h: Float) {
+        val ap = apex
+        if (lines.isEmpty()) {
+            drawGridLines(c, 1f / 3f, 2f / 3f, w, h)
+            levelText.color = Color.WHITE
+            c.drawText("Looking for lines… (horizon, road, hill, roof)", w / 2f, h * 0.08f, levelText)
+            return
+        }
+        for (l in lines) {
+            if (ap != null && l.kind == 2) {
+                // triangle side: from the apex down to the frame edge
+                val far = if (hypot(l.x1 - ap.x, l.y1 - ap.y) > hypot(l.x2 - ap.x, l.y2 - ap.y)) PointF(l.x1, l.y1) else PointF(l.x2, l.y2)
+                val dx = far.x - ap.x; val dy = far.y - ap.y
+                var t = 1e9f
+                if (dx > 0) t = min(t, (1f - ap.x) / dx) else if (dx < 0) t = min(t, -ap.x / dx)
+                if (dy > 0) t = min(t, (1f - ap.y) / dy)
+                c.drawLine(ap.x * w, ap.y * h, (ap.x + dx * t) * w, (ap.y + dy * t) * h, linePaint)
+            } else drawExtended(c, l.x1, l.y1, l.x2, l.y2, w, h)
+        }
+        levelText.color = Color.WHITE
+        val label = when {
+            ap != null -> "Triangle"
+            longestLeading() != null -> "Leading line"
+            lines.any { it.kind == 0 } -> "Horizon line"
+            else -> "Vertical line"
+        }
+        c.drawText(label, w / 2f, h * 0.08f, levelText)
+    }
+
+    private fun drawFrame(c: Canvas, w: Float, h: Float) {
+        val mx = 0.09f; val my = 0.1f
+        c.drawRect(w * mx, h * my, w * (1 - mx), h * (1 - my), gridPaint)
+        val iw = 1 - 2 * mx; val ih = 1 - 2 * my
+        for (f in listOf(1f / 3f, 2f / 3f)) {
+            c.drawLine(w * (mx + iw * f), h * my, w * (mx + iw * f), h * (1 - my), guidePaint)
+            c.drawLine(w * mx, h * (my + ih * f), w * (1 - mx), h * (my + ih * f), guidePaint)
+        }
+        levelText.color = Color.argb(220, 255, 255, 255)
+        c.drawText("Frame with a door, window, arch or branches", w / 2f, h * my - 8f * d, levelText)
+    }
+
+    private fun framePoints(): List<PointF> {
+        val mx = 0.09f; val my = 0.1f
+        val iw = 1 - 2 * mx; val ih = 1 - 2 * my
+        return listOf(
+            PointF(mx + iw / 3f, my + ih / 3f), PointF(mx + iw * 2f / 3f, my + ih / 3f),
+            PointF(mx + iw / 3f, my + ih * 2f / 3f), PointF(mx + iw * 2f / 3f, my + ih * 2f / 3f),
+            PointF(0.5f, my + ih * 2f / 3f)
+        )
+    }
+
     /** Name of the grid currently shown (saved with each photo). */
     fun activeGridLabel(): String = activeMode.label
 
@@ -306,13 +699,22 @@ class GridOverlayView @JvmOverloads constructor(
         val sc = scene
         val area = if (s != null) s.width() * s.height() else 0f
         if (s != null && area > 0.40f) return GridMode.CENTER to "Large subject: center it for a bold shot."
+        if (vanish != null) return GridMode.VANISHING to "Lines meet in the distance: put the subject at the vanishing point."
+        if (apex != null) return GridMode.LINES to "Triangle shape (hill, roof, tent): a strong, stable composition."
+        if (longestLeading() != null) return GridMode.LINES to "Strong leading line: put the subject on it so the eye follows."
+        if (sc != null && sc.empty > 0.65f && (s == null || s.width() * s.height() < 0.06f)) {
+            return GridMode.NEGATIVE to "Lots of plain space (sky, wall): small subject near the edge = calm, strong photo."
+        }
         if (sc != null && sc.symmetry > 0.72f) {
-            return GridMode.CENTER to "Symmetric surroundings: center the subject for a mirror-like shot."
+            return GridMode.SYMMETRY to "Symmetric surroundings: center the subject for a mirror-like shot."
         }
         if (sc != null && sc.diagonal > 0.55f) {
             return if (s != null && area in 0.05f..0.25f)
                 GridMode.TRIANGLES to "Strong diagonal lines around it: golden triangles follow them."
             else GridMode.DIAGONAL to "Strong diagonal lines: let them lead the eye to the subject."
+        }
+        if (sc != null && sc.layers.all { it > LAYER_MIN } && (s == null || s.centerY() in 0.3f..0.7f)) {
+            return GridMode.LAYERS to "Foreground, middle and background all have detail: layering gives depth."
         }
         if (sc != null && !sc.horizonY.isNaN()) {
             return GridMode.THIRDS to "Long horizontal line (horizon/edge): keep it on a third line."
@@ -570,6 +972,12 @@ class GridOverlayView @JvmOverloads constructor(
         GridMode.TRIANGLES -> trianglePoints(trianglesMirrored, w, h)
         GridMode.SQUARE -> grid4(0.25f, 0.75f) + PointF(0.5f, 0.5f)
         GridMode.ARMATURE -> grid4(1f / 3f, 2f / 3f) + strongPoints(GridMode.DIAGONAL, w, h)
+        GridMode.LINES -> linePoints()
+        GridMode.VANISHING -> listOf(vanish?.let { PointF(it.x, it.y) } ?: PointF(0.5f, 0.5f))
+        GridMode.SYMMETRY -> listOf(PointF(0.5f, 1f / 3f), PointF(0.5f, 0.5f), PointF(0.5f, 2f / 3f))
+        GridMode.NEGATIVE -> negativePoints()
+        GridMode.LAYERS -> listOf(PointF(1f / 3f, 0.5f), PointF(2f / 3f, 0.5f), PointF(0.5f, 0.5f))
+        GridMode.FRAME -> framePoints()
         GridMode.CENTER, GridMode.SAFE, GridMode.AUTO -> listOf(PointF(0.5f, 0.5f))
     }
 
@@ -582,11 +990,20 @@ class GridOverlayView @JvmOverloads constructor(
         if (w <= 0f || h <= 0f) return
 
         drawGridCached(canvas, w, h)
+        when (activeMode) {
+            GridMode.LINES -> drawSceneLines(canvas, w, h)
+            GridMode.VANISHING -> drawVanishing(canvas, w, h)
+            GridMode.SYMMETRY -> drawSymmetry(canvas, w, h)
+            GridMode.NEGATIVE -> drawNegative(canvas, w, h)
+            GridMode.LAYERS -> drawLayers(canvas, w, h)
+            else -> {}
+        }
         if (!horizonScreenY.isNaN()) {
             canvas.drawLine(0f, horizonScreenY * h, w, horizonScreenY * h, horizonPaint)
         }
         drawLevel(canvas, w, h)
         drawExtras(canvas, w, h)
+        if (colourWheel) drawColourWheel(canvas, w, h)
 
         val pts = if (activeMode == GridMode.SPIRAL) listOf(currentEye()) else strongPoints(activeMode, w, h)
         for (p in pts) canvas.drawCircle(p.x * w, p.y * h, 4f * d, dotPaint)
@@ -669,6 +1086,8 @@ class GridOverlayView @JvmOverloads constructor(
                 GridMode.SQUARE -> drawSquare(c, w, h)
                 GridMode.ARMATURE -> drawArmature(c, w, h)
                 GridMode.SAFE -> drawSafe(c, w, h)
+                GridMode.FRAME -> drawFrame(c, w, h)
+                GridMode.LINES, GridMode.VANISHING, GridMode.SYMMETRY, GridMode.NEGATIVE, GridMode.LAYERS -> {}   // live, drawn every frame
             }
             gridCache = bmp
             gridKey = key

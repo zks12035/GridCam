@@ -60,6 +60,8 @@ class EditState {
     var perspV = 0f                     // vertical keystone (-1..1)
     var perspH = 0f                     // horizontal keystone (-1..1)
     var strokes = ArrayList<Stroke>()   // healing + selective brush strokes (in final-image coordinates)
+    var harmony = 0                     // colour-wheel grade: 0 off, see EditRender.HARMONIES
+    var harmonyStrength = 0.7f
 
     fun copy(): EditState {
         val c = EditState()
@@ -70,6 +72,7 @@ class EditState {
         c.cropRect = cropRect.copyOf(); c.cropAspect = cropAspect
         c.curve = curve.copyOf(); c.hsl = hsl.copyOf(); c.denoise = denoise.copyOf()
         c.perspV = perspV; c.perspH = perspH; c.strokes = ArrayList(strokes)
+        c.harmony = harmony; c.harmonyStrength = harmonyStrength
         return c
     }
 }
@@ -105,6 +108,7 @@ object EditRender {
         if (st.strokes.any { it.kind == 0 }) b = heal(b, st)
         b = tone(b, st)
         if (st.hsl.any { abs(it) > 0.005f }) b = colourMixer(b, st)
+        if (st.harmony > 0 && st.harmonyStrength > 0.01f) b = harmonize(b, st.harmony, st.harmonyStrength)
         if (st.denoise[0] > 0.01f || st.denoise[1] > 0.01f) b = denoise(b, st)
         if (st.details[0] > 0.01f || st.details[1] > 0.01f) b = details(b, st)
         if (st.strokes.any { it.kind != 0 }) b = brush(b, st)
@@ -219,6 +223,67 @@ object EditRender {
         "Aqua" to 180f, "Blue" to 225f, "Purple" to 270f, "Magenta" to 315f)
 
     /** Colour mixer: hue / saturation / luminance per colour band. */
+    /** Colour-theory grades (colour wheel): pull every colour toward a harmonious set of hues. */
+    val HARMONIES = listOf("Off", "Teal & Orange", "Red & Green", "Purple & Yellow", "Triadic", "Analogous")
+
+    private fun dominantHue(px: IntArray): Float {
+        val hist = FloatArray(36)
+        val hsv = FloatArray(3)
+        var i = 0
+        while (i < px.size) {
+            Color.colorToHSV(px[i], hsv)
+            if (hsv[1] > 0.2f && hsv[2] > 0.15f) hist[(hsv[0] / 10f).toInt().coerceIn(0, 35)] += hsv[1] * hsv[2]
+            i += 7
+        }
+        var best = 0
+        for (k in 0 until 36) if (hist[k] > hist[best]) best = k
+        return best * 10f + 5f
+    }
+
+    private fun harmonize(src: Bitmap, mode: Int, strength: Float): Bitmap {
+        val w = src.width; val h = src.height
+        val px = IntArray(w * h)
+        src.getPixels(px, 0, w, 0, 0, w, h)
+        val d = if (mode >= 4) dominantHue(px) else 0f
+        val targets = when (mode) {
+            1 -> floatArrayOf(28f, 188f)              // orange skin/light, teal shadows/sky
+            2 -> floatArrayOf(2f, 115f)
+            3 -> floatArrayOf(278f, 55f)
+            4 -> floatArrayOf(d, (d + 120f) % 360f, (d + 240f) % 360f)
+            else -> floatArrayOf((d + 330f) % 360f, d, (d + 30f) % 360f)
+        }
+        val complementary = mode in 1..3
+        val hsv = FloatArray(3)
+        for (i in px.indices) {
+            Color.colorToHSV(px[i], hsv)
+            if (hsv[1] > 0.04f) {
+                var bestT = targets[0]; var bestD = 999f; var bestSigned = 0f
+                for (t in targets) {
+                    var dd = t - hsv[0]
+                    if (dd > 180f) dd -= 360f
+                    if (dd < -180f) dd += 360f
+                    if (abs(dd) < bestD) { bestD = abs(dd); bestT = t; bestSigned = dd }
+                }
+                val f = strength * 0.75f * min(1f, hsv[1] * 2.5f)
+                hsv[0] = (hsv[0] + bestSigned * f + 360f) % 360f
+                if (complementary) hsv[1] = (hsv[1] * (1f + 0.25f * strength)).coerceAtMost(1f)
+            }
+            var c = Color.HSVToColor(hsv)
+            if (mode == 1) {
+                // cinematic split-tone: teal in the shadows, warm in the highlights
+                val v = hsv[2]
+                val ts = (1f - v) * 0.14f * strength
+                val th = v * v * 0.08f * strength
+                var r = Color.red(c).toFloat(); var g = Color.green(c).toFloat(); var b = Color.blue(c).toFloat()
+                r += (0f - r) * ts; g += (110f - g) * ts; b += (120f - b) * ts
+                r += (255f - r) * th; g += (170f - g) * th; b += (90f - b) * th
+                c = Color.rgb(r.toInt().coerceIn(0, 255), g.toInt().coerceIn(0, 255), b.toInt().coerceIn(0, 255))
+            }
+            px[i] = c
+        }
+        return Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+    }
+
     private fun colourMixer(src: Bitmap, st: EditState): Bitmap {
         val w = src.width; val h = src.height
         val px = IntArray(w * h)
@@ -596,6 +661,11 @@ class EditorActivity : AppCompatActivity() {
                 chips = EditRender.HSL_BANDS.map { it.first },
                 chipSelected = { hslBand },
                 onChip = { _, i -> hslBand = i }),
+            Category("Harmony",
+                listOf(s("Strength", "✦", 0f, 1f, { it.harmonyStrength }, { st, v -> st.harmonyStrength = v })),
+                chips = EditRender.HARMONIES,
+                chipSelected = { it.harmony },
+                onChip = { st, i -> st.harmony = i }),
             Category("Retouch", listOf(
                 b("Heal", "✚", 0, 1f), b("Brighten", "☀", 1, 0.6f), b("Darken", "☾", 1, -0.6f),
                 b("Saturate", "◉", 2, 0.7f), b("Desaturate", "○", 2, -0.7f),
@@ -844,6 +914,7 @@ class EditorActivity : AppCompatActivity() {
         o.put("denoise", arr(state.denoise)); o.put("bwParams", arr(state.bwParams))
         o.put("look", state.look); o.put("lookStrength", state.lookStrength.toDouble())
         o.put("bw", state.bw); o.put("bwFilter", state.bwFilter)
+        o.put("harmony", state.harmony); o.put("harmonyStrength", state.harmonyStrength.toDouble())
         list.put(o)
         presetPrefs().edit().putString("list", list.toString()).apply()
         Toast.makeText(this, "Saved as \"" + o.getString("name") + "\"", Toast.LENGTH_SHORT).show()
@@ -857,6 +928,7 @@ class EditorActivity : AppCompatActivity() {
         fill(state.denoise, o.optJSONArray("denoise")); fill(state.bwParams, o.optJSONArray("bwParams"))
         state.look = o.optInt("look"); state.lookStrength = o.optDouble("lookStrength", 1.0).toFloat()
         state.bw = o.optBoolean("bw"); state.bwFilter = o.optInt("bwFilter")
+        state.harmony = o.optInt("harmony"); state.harmonyStrength = o.optDouble("harmonyStrength", 0.7).toFloat()
         render()
     }
 
